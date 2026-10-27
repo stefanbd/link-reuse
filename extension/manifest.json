@@ -1,15 +1,33 @@
 {
   "manifest_version": 3,
   "name": "Link Reuse",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Reuse existing tabs through OpenIn using observed redirects and same-resource URLs stored locally.",
-  "permissions": ["webNavigation", "nativeMessaging", "tabs"],
-  "background": { "service_worker": "background.mjs", "type": "module" },
-  "content_scripts": [{
-    "matches": ["http://*/*", "https://*/*"],
-    "js": ["interaction.js", "canonical.js"],
-    "run_at": "document_start"
-  }],
-  "action": { "default_popup": "popup.html" },
-  "incognito": "not_allowed"
+  "permissions": [
+    "webNavigation",
+    "nativeMessaging",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "background.mjs",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "interaction.js",
+        "canonical.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "incognito": "not_allowed",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnYNZQQUlTRvleuaMQ66ecLdZU+P9tp0uu0UFQm8EK4lOqhAz3BkTrIyErJJFOGjVatejtW2Gy0v8CHhPnTzBd/CxJgS1O7aHARhgifzIUWCVHU8xhdp4GgKFfQD5d2tKUftqqg5x8EO5VZqxowaW6tdTGSbaHoZyoeKiJKnq3Ghx3qxWETPsOJHPcl2Z8a5TRciP42kSEjWlpXB9hR6IDvfEfwyoBIOs6mnQlW7EGLS6/TczHZJbAho0cy4IqWBL0y9objPQxrJASSsDHEEdISr+NP1NGjQTCAFROhkt1ULVF+Wngzp3S9NUYJRUT6cWBiO328wWwcY/7SfOOlSRCwIDAQAB"
 }

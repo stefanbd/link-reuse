@@ -6,7 +6,6 @@
   "maxPendingBytes": 131072,
   "maxBatchRecords": 32,
   "maxSnapshotBytes": 524288,
-  "helperIdleSeconds": 120,
   "blockedQueryKeys": ["code", "token", "accesstoken", "refreshtoken", "idtoken", "auth", "authorization", "password", "passwd", "pwd", "secret", "clientsecret", "apikey", "key", "signature", "sig", "samlrequest", "samlresponse", "samlart", "ticket", "session", "sessionid", "jwt", "otp", "oobcode", "logintoken", "resettoken", "verificationtoken"],
   "blockedQueryPrefixes": ["xamz", "xgoog"],
   "blockedPathSegments": ["login", "signin", "signout", "logout", "oauth", "oauth2", "authorize", "authorization", "callback", "sso", "saml", "password", "reset", "resetpassword", "passwordreset", "verify", "verification", "magiclink", "auth", "activate", "authentication"],

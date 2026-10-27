@@ -1,8 +1,6 @@
 import AppKit
 import Darwin
 
-let supportedBrowsers: Set<String> = ["company.thebrowser.Browser", "com.google.Chrome", "com.brave.Browser", "com.microsoft.edgemac.Beta"]
-
 struct LearningRecord: Codable, Equatable {
     let kind: String
     let source: String
@@ -30,7 +28,6 @@ final class LearningStore {
 
     init(browserID: String, policy: LearningPolicy, root: URL = URL.applicationSupportDirectory.appending(path: "Link Reuse/Live"),
          sessionIsLive: ((LearningSession) -> Bool)? = nil) {
-        precondition(supportedBrowsers.contains(browserID))
         directory = root.appending(path: browserID)
         self.policy = policy
         self.sessionIsLive = sessionIsLive ?? { session in
@@ -41,7 +38,7 @@ final class LearningStore {
             let length = proc_pidpath(session.pid, &buffer, UInt32(buffer.count))
             guard length > 0 else { return false }
             let executable = String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            return executable == FileManager.default.homeDirectoryForCurrentUser.appending(path: "src/link-reuse/native-host").path
+            return executable == AppResources.recorderURL.path
         }
     }
 

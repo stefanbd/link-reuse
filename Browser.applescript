@@ -2,7 +2,9 @@ on snapshot()
     tell application "Google Chrome"
         set activeURL to ""
         if (count of windows) > 0 then
-            if mode of front window is "normal" and (count of tabs of front window) > 0 then set activeURL to URL of active tab of front window
+            try
+                if mode of front window is "normal" and (count of tabs of front window) > 0 then set activeURL to URL of active tab of front window
+            end try
         end if
         return {activeURL, URL of every tab of (every window whose mode is "normal")}
     end tell
@@ -11,6 +13,7 @@ end snapshot
 on focustab(expectedURL)
     tell application "Google Chrome"
         if (count of windows) > 0 then
+            try
             if mode of front window is "normal" and (count of tabs of front window) > 0 then
                 considering case
                     if URL of active tab of front window is expectedURL then
@@ -19,6 +22,7 @@ on focustab(expectedURL)
                     end if
                 end considering
             end if
+            end try
         end if
         repeat with browserWindow in (get every window whose mode is "normal")
             set tabURLs to URL of every tab of browserWindow

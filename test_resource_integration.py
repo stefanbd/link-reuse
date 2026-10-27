@@ -68,7 +68,10 @@ def open_url(url):
     subprocess.run(['open', url], check=True)
 
 
-original = state()
+try:
+    original = state()
+except subprocess.CalledProcessError:
+    original = ['', '', '']
 try:
     product = base + prefix + '/products/42'
     reviews = product + '/reviews'
@@ -118,6 +121,6 @@ finally:
                 if item ti of urls starts with "{base + prefix}" then close tab ti of window wi
             end repeat
         end repeat
-        select tab id "{original[1]}" of front window
+        if "{original[1]}" is not "" then select tab id "{original[1]}" of front window
     end tell''')
     server.shutdown()

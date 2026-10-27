@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 import sys
+import urllib.parse
 
 requests = collections.Counter()
 
@@ -66,16 +67,22 @@ def open_helper(short, url):
     if '--openin' in sys.argv:
         subprocess.run(['open', url], check=True)
         return
-    app = pathlib.Path.home() / f'Applications/Link Reuse/{short} Reuse.app'
-    subprocess.run(['open', '-g', '-a', str(app), url], check=True)
+    app = pathlib.Path.home() / 'Applications/Link Reuse.app'
+    request = f'linkreuse://open/{short}?url=' + urllib.parse.quote(url, safe='')
+    subprocess.run(['open', '-g', '-a', str(app), request], check=True)
 
-for browser, short in [('Arc','Arc'), ('Google Chrome','Chrome'), ('Brave Browser','Brave'), ('Microsoft Edge Beta','EdgeBeta')]:
+for entry in json.loads((pathlib.Path.home() / 'Applications/Link Reuse.app/Contents/Resources/configuration.json').read_text())['browsers']:
+    browser, short = entry['name'], entry['id']
     if len(sys.argv) > 1 and short not in sys.argv[1:]:
         continue
     was_running = apple(f'application "{browser}" is running') == 'true'
     original_id = apple(f'''tell application "{browser}"
         if (count of windows) is 0 then return ""
-        return id of active tab of front window
+        try
+            return id of active tab of front window
+        on error
+            return ""
+        end try
     end tell''') if was_running else ''
     url_a = base + '/' + short + '/a'
     url_b = base + '/' + short + '/b'

@@ -66,11 +66,10 @@ struct LearningTests {
         check(try Data(contentsOf: bounded.directory.appending(path: "cache.json")).count <= 2048)
         check(snapshot.sessions[0].records.last?.source == additions.last?.source)
 
-        check(helperExitDelay(preferred: true, browserRunning: true, handledLink: true, busy: false, idleFor: 9999, idleLimit: 120) == nil)
-        check(helperExitDelay(preferred: false, browserRunning: true, handledLink: true, busy: false, idleFor: 60, idleLimit: 120) == 60)
-        check(helperExitDelay(preferred: false, browserRunning: true, handledLink: true, busy: false, idleFor: 121, idleLimit: 120) == 0)
-        check(helperExitDelay(preferred: true, browserRunning: false, handledLink: true, busy: false, idleFor: 0, idleLimit: 120) == 0)
-        check(helperExitDelay(preferred: false, browserRunning: false, handledLink: true, busy: true, idleFor: 999, idleLimit: 120) == nil)
+        check(!shouldExitRouter(busy: true, browserRunning: false))
+        check(!shouldExitRouter(busy: true, browserRunning: true))
+        check(!shouldExitRouter(busy: false, browserRunning: true))
+        check(shouldExitRouter(busy: false, browserRunning: false))
 
         let pipe = Pipe()
         try NativeHost.writeFrame(Data("test".utf8), to: pipe.fileHandleForWriting)

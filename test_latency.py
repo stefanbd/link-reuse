@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
+import urllib.parse
 
 arrived = {}
 class Page(http.server.BaseHTTPRequestHandler):
@@ -25,7 +26,7 @@ server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Page)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 prefix = '/link-reuse-timing-' + uuid.uuid4().hex
 base = f'http://127.0.0.1:{server.server_port}'
-helper = str(pathlib.Path.home()/'Applications/Link Reuse/Arc Reuse.app')
+helper = str(pathlib.Path.home()/'Applications/Link Reuse.app')
 measurements = collections.defaultdict(list)
 try:
     for round_number in range(3):
@@ -33,12 +34,15 @@ try:
             path = prefix + f'/{round_number}/{kind}'
             command = {'direct':['open','-a','/Applications/Arc.app'], 'helper':['open','-g','-a',helper], 'openin':['open']}[kind]
             start = time.monotonic()
-            subprocess.run(command+[base+path],check=True)
+            url = base + path
+            if kind == 'helper': url = 'linkreuse://open/Arc?url=' + urllib.parse.quote(url, safe='')
+            subprocess.run(command+[url],check=True)
             deadline = start+20
             while path not in arrived and time.monotonic()<deadline:
                 time.sleep(0.005)
             if path not in arrived: raise RuntimeError(f'No page request for {kind}')
             measurements[kind].append(round((arrived[path]-start)*1000,1))
+    subprocess.run([str(pathlib.Path(helper) / 'Contents/MacOS/LinkReuse'), '--benchmark', 'Arc'], check=True)
     print(json.dumps({'samples_ms_to_first_page_request':measurements,'medians_ms':{k:statistics.median(v) for k,v in measurements.items()}},indent=2))
 finally:
     cleanup=f'''tell application "Arc"

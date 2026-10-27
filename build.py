@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import base64
+import hashlib
+import json
 import pathlib
 import plistlib
 import shutil
@@ -6,56 +9,50 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parent
 BUILD = ROOT / 'build'
-BROWSERS = [
-    ('Arc', 'company.thebrowser.Browser', '/Applications/Arc.app', 'Arc'),
-    ('Google Chrome', 'com.google.Chrome', '/Applications/Google Chrome.app', 'Chrome'),
-    ('Brave Browser', 'com.brave.Browser', '/Applications/Brave Browser.app', 'Brave'),
-    ('Microsoft Edge Beta', 'com.microsoft.edgemac.Beta', '/Applications/Microsoft Edge Beta.app', 'EdgeBeta'),
-]
-
+APP = BUILD / 'Link Reuse.app'
 BUILD.mkdir(exist_ok=True)
+if APP.exists():
+    shutil.rmtree(APP)
+resources = APP / 'Contents/Resources'
+resources.mkdir(parents=True)
+main = APP / 'Contents/MacOS/LinkReuse'
+host = APP / 'Contents/Helpers/LinkReuseHost'
+main.parent.mkdir()
+host.parent.mkdir()
 subprocess.run([
     'xcrun', 'swiftc', '-swift-version', '6', '-O', '-module-cache-path', str(BUILD / 'module-cache'),
-    *[str(ROOT / name) for name in ['main.swift', 'URLMatching.swift', 'LearningPolicy.swift', 'LearningStore.swift', 'NativeHost.swift']], '-o', str(BUILD / 'LinkReuse'),
+    *[str(ROOT / name) for name in ['main.swift', 'BrowserConfiguration.swift', 'OpenRequest.swift', 'URLMatching.swift',
+                                  'LearningPolicy.swift', 'LearningStore.swift', 'NativeHost.swift']], '-o', str(main),
 ], check=True)
-
-for name, bundle_id, source_path, short_name in BROWSERS:
-    app = BUILD / f'{short_name} Reuse.app'
-    resources = app / 'Contents/Resources'
-    executable = app / 'Contents/MacOS/LinkReuse'
-    resources.mkdir(parents=True, exist_ok=True)
-    executable.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(BUILD / 'LinkReuse', executable)
-    shutil.copy2(ROOT / 'extension/learning-policy.json', resources / 'learning-policy.json')
-    template = ROOT / ('Arc.applescript' if short_name == 'Arc' else 'Browser.applescript')
-    script = template.read_text().replace('application "Google Chrome"', f'application "{source_path}"')
-    subprocess.run(['osacompile', '-o', str(resources / 'Browser.scpt')], input=script, text=True, check=True)
-    info = {
-        'CFBundleIdentifier': f'me.dichev.LinkReuse.{short_name}',
-        'CFBundleName': f'{short_name} Reuse',
-        'CFBundleDisplayName': f'{short_name} Reuse',
-        'CFBundleExecutable': 'LinkReuse',
-        'CFBundlePackageType': 'APPL',
-        'CFBundleVersion': '3',
-        'CFBundleShortVersionString': '2.0',
-        'LSMinimumSystemVersion': '14.0',
-        'LSUIElement': True,
-        'NSAppleEventsUsageDescription': f'Find and select an existing {name} tab before opening an external link.',
-        'ReuseBrowserBundleID': bundle_id,
-        'ReuseBrowserName': name,
-        'CFBundleURLTypes': [{'CFBundleURLName': 'Web links', 'CFBundleTypeRole': 'Viewer', 'CFBundleURLSchemes': ['http', 'https']}],
-    }
-    source_app = pathlib.Path(source_path)
-    source_info = plistlib.loads((source_app / 'Contents/Info.plist').read_bytes())
-    icon = source_info.get('CFBundleIconFile')
-    if icon:
-        icon_path = source_app / 'Contents/Resources' / icon
-        if not icon_path.suffix:
-            icon_path = icon_path.with_suffix('.icns')
-        if icon_path.exists():
-            shutil.copy2(icon_path, resources / 'Browser.icns')
-            info['CFBundleIconFile'] = 'Browser.icns'
-    (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
-    subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
-    subprocess.run([str(executable), '--self-test'], check=True)
-    print(f'Built {app.name}')
+shutil.copy2(main, host)
+shutil.copytree(ROOT / 'extension', resources / 'extension')
+manifest = json.loads((ROOT / 'extension/manifest.json').read_text())
+digest = hashlib.sha256(base64.b64decode(manifest['key'], validate=True)).hexdigest()[:32]
+extension_id = ''.join(chr(ord('a') + int(char, 16)) for char in digest)
+browsers = [browser for browser in json.loads((ROOT / 'browsers.json').read_text())
+            if pathlib.Path(browser['appPath']).is_dir()]
+if not browsers:
+    raise SystemExit('Install at least one supported browser before building.')
+for browser in browsers:
+    script = (ROOT / (browser['script'] + '.applescript')).read_text()
+    script = script.replace('application "Google Chrome"', f'application "{browser["appPath"]}"')
+    subprocess.run(['osacompile', '-o', str(resources / (browser['id'] + '.scpt'))], input=script, text=True, check=True)
+(resources / 'configuration.json').write_text(json.dumps({
+    'browsers': browsers, 'extensionOrigin': f'chrome-extension://{extension_id}/',
+}, indent=2))
+info = {
+    'CFBundleIdentifier': 'me.dichev.LinkReuse', 'CFBundleName': 'Link Reuse',
+    'CFBundleDisplayName': 'Link Reuse', 'CFBundleExecutable': 'LinkReuse',
+    'CFBundlePackageType': 'APPL', 'CFBundleVersion': '4', 'CFBundleShortVersionString': '3.0',
+    'LSMinimumSystemVersion': '14.0', 'LSUIElement': True,
+    'NSAppleEventsUsageDescription': 'Find and select an existing browser tab before opening an external link.',
+    'CFBundleURLTypes': [{'CFBundleURLName': 'Link Reuse request', 'CFBundleTypeRole': 'Viewer',
+                         'CFBundleURLSchemes': ['linkreuse']}],
+}
+(APP / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+subprocess.run(['codesign', '--force', '--sign', '-', '--identifier', 'me.dichev.LinkReuse.Host', str(host)], check=True)
+subprocess.run(['codesign', '--force', '--sign', '-', str(APP)], check=True)
+subprocess.run(['codesign', '--verify', '--deep', '--strict', str(APP)], check=True)
+subprocess.run([str(main), '--self-test'], check=True)
+print('Built one Link Reuse.app for:', ', '.join(browser['name'] for browser in browsers))
+print('Stable extension ID:', extension_id)

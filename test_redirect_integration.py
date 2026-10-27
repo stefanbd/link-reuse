@@ -57,7 +57,10 @@ def state(url):
                 if item ti of tabURLs is "{url}" then set end of matchingIDs to (item ti of tabIDs as text)
             end repeat
         end repeat
-        set activeID to id of active tab of front window
+        set activeID to ""
+        try
+            set activeID to id of active tab of front window
+        end try
         set AppleScript's text item delimiters to "|"
         return (totalTabs as text) & ";" & (matchingIDs as text) & ";" & (activeID as text)
     end tell''').split(';')
@@ -77,7 +80,13 @@ def wait_for(check, label):
         time.sleep(.1)
     raise RuntimeError('Timed out: '+label)
 
-original_id=apple('tell application "Arc" to return id of active tab of front window')
+original_id=apple('''tell application "Arc"
+    try
+        return id of active tab of front window
+    on error
+        return ""
+    end try
+end tell''')
 try:
     for kind in ([] if '--sensitive-only' in sys.argv else ['http','js','spa']):
         source=base+prefix+'/start-'+kind
@@ -123,6 +132,6 @@ finally:
                 if item ti of tabURLs starts with "{base+prefix}" then close tab ti of window wi
             end repeat
         end repeat
-        select tab id "{original_id}" of front window
+        if "{original_id}" is not "" then select tab id "{original_id}" of front window
     end tell''')
     server.shutdown()

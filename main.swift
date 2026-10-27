@@ -11,16 +11,12 @@ final class BrowserRouter {
     let policy: LearningPolicy
     private let learning: LearningStore
 
-    init() throws {
-        guard let browserID = Bundle.main.object(forInfoDictionaryKey: "ReuseBrowserBundleID") as? String,
-              let name = Bundle.main.object(forInfoDictionaryKey: "ReuseBrowserName") as? String,
-              let scriptURL = Bundle.main.url(forResource: "Browser", withExtension: "scpt") else {
-            throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: "The app bundle is incomplete."])
-        }
-        bundleID = browserID
-        browserName = name
-        policy = try LearningPolicy.load()
-        learning = LearningStore(browserID: browserID, policy: policy)
+    init(browser: BrowserConfiguration, resources: AppResources) throws {
+        bundleID = browser.bundleID
+        browserName = browser.name
+        policy = resources.policy
+        learning = LearningStore(browserID: browser.bundleID, policy: policy)
+        let scriptURL = resources.directory.appending(path: "\(browser.id).scpt")
         var error: NSDictionary?
         guard let loaded = NSAppleScript(contentsOf: scriptURL, error: &error) else {
             throw Self.scriptError(error)
@@ -94,10 +90,6 @@ final class BrowserRouter {
         return false
     }
 
-    func recordFailure(_ error: Error) {
-        logger.error("routing failed; code=\((error as NSError).code, privacy: .public)")
-    }
-
     func openDirectly(_ urls: [URL]) async throws {
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
             throw NSError(domain: "LinkReuse", code: 2, userInfo: [NSLocalizedDescriptionKey: "\(browserName) is not installed."])
@@ -108,81 +100,70 @@ final class BrowserRouter {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let router: BrowserRouter
-    private var pending: [URL] = []
+    private let resources: AppResources
+    private var routers: [String: BrowserRouter] = [:]
+    private var pending: [OpenRequest] = []
     private var processing = false
-    private var preferred = false
-    private var handledLink = false
-    private var lastUse = ContinuousClock.now
-    private var exitTask: Task<Void, Never>?
 
-    init(router: BrowserRouter) { self.router = router }
+    init(resources: AppResources) { self.resources = resources }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let workspace = NSWorkspace.shared
-        preferred = workspace.frontmostApplication?.bundleIdentifier == router.bundleID
-        workspace.notificationCenter.addObserver(self, selector: #selector(workspaceChanged(_:)), name: NSWorkspace.didActivateApplicationNotification, object: nil)
-        workspace.notificationCenter.addObserver(self, selector: #selector(workspaceChanged(_:)), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
-        scheduleExit()
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(browserTerminated(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+        terminateIfUnused()
     }
 
-    @objc private func workspaceChanged(_ notification: Notification) {
+    @objc private func browserTerminated(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              let id = app.bundleIdentifier, supportedBrowsers.contains(id) else { return }
-        if notification.name == NSWorkspace.didActivateApplicationNotification {
-            if preferred || id == router.bundleID { lastUse = .now }
-            preferred = id == router.bundleID
-        }
-        if notification.name == NSWorkspace.didTerminateApplicationNotification && id == router.bundleID { handledLink = true }
-        scheduleExit()
+              resources.browsers.contains(where: { $0.bundleID == app.bundleIdentifier }) else { return }
+        terminateIfUnused()
     }
 
-    private func scheduleExit() {
-        exitTask?.cancel()
-        let elapsed = lastUse.duration(to: .now).components
-        let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
-        guard let delay = helperExitDelay(preferred: preferred, browserRunning: router.isRunning, handledLink: handledLink,
-                                         busy: processing, idleFor: seconds, idleLimit: router.policy.helperIdleSeconds) else { return }
-        exitTask = Task {
-            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
-            guard !processing else { return }
-            NSApp.terminate(nil)
-        }
+    private func terminateIfUnused() {
+        let running = resources.browsers.contains { !NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundleID).isEmpty }
+        if shouldExitRouter(busy: processing, browserRunning: running) { NSApp.terminate(nil) }
+    }
+
+    private func router(for browser: BrowserConfiguration) throws -> BrowserRouter {
+        if let router = routers[browser.id] { return router }
+        let router = try BrowserRouter(browser: browser, resources: resources)
+        routers[browser.id] = router
+        return router
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        pending.append(contentsOf: urls.filter { urlKey($0.absoluteString) != nil })
-        lastUse = .now
-        handledLink = true
-        preferred = true
-        exitTask?.cancel()
+        pending.append(contentsOf: urls.compactMap { OpenRequest($0, browsers: resources.browsers) })
         guard !processing else { return }
         processing = true
         Task {
             while !pending.isEmpty {
-                let url = pending.removeFirst()
+                let request = pending.removeFirst()
                 do {
-                    if router.policy.allows(url.absoluteString) && router.isRunning {
-                        if try !router.reuse(url) { try await router.openDirectly([url]) }
+                    let router = try router(for: request.browser)
+                    if router.policy.allows(request.url.absoluteString) && router.isRunning {
+                        if try !router.reuse(request.url) { try await router.openDirectly([request.url]) }
                     } else {
-                        try await router.openDirectly([url])
+                        try await router.openDirectly([request.url])
                     }
                 } catch {
-                    router.recordFailure(error)
                     let alert = NSAlert()
-                    alert.messageText = "Couldn’t reuse a \(router.browserName) tab"
+                    alert.messageText = "Couldn’t reuse a \(request.browser.name) tab"
                     alert.informativeText = error.localizedDescription
                     alert.addButton(withTitle: "Open Link Anyway")
                     alert.addButton(withTitle: "Cancel")
                     NSApp.activate()
                     if alert.runModal() == .alertFirstButtonReturn {
-                        do { try await router.openDirectly([url]) }
-                        catch { NSAlert(error: error).runModal() }
+                        do {
+                            guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.browser.bundleID) else {
+                                throw CocoaError(.fileNoSuchFile)
+                            }
+                            _ = try await NSWorkspace.shared.open([request.url], withApplicationAt: app, configuration: .init())
+                        } catch { NSAlert(error: error).runModal() }
                     }
                 }
             }
             processing = false
-            scheduleExit()
+            terminateIfUnused()
         }
     }
 
@@ -192,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 func main() throws {
     if CommandLine.arguments.dropFirst().first?.hasPrefix("chrome-extension://") == true {
-        do { try NativeHost.run(policy: LearningPolicy.load()) }
+        do { try NativeHost.run(resources: AppResources()) }
         catch { fputs("Link Reuse recorder stopped; no URL data was logged.\n", stderr); exit(1) }
         return
     }
@@ -214,8 +195,13 @@ func main() throws {
         print("11 URL matching checks passed")
         return
     }
-    let router = try BrowserRouter()
-    if CommandLine.arguments.contains("--benchmark") {
+    let resources = try AppResources()
+    if let index = CommandLine.arguments.firstIndex(of: "--benchmark") {
+        guard CommandLine.arguments.indices.contains(index + 1),
+              let browser = resources.browsers.first(where: { $0.id == CommandLine.arguments[index + 1] }) else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        let router = try BrowserRouter(browser: browser, resources: resources)
         guard router.isRunning else { print("Browser is not running"); return }
         var timings: [Double] = []
         for _ in 0..<20 {
@@ -230,7 +216,7 @@ func main() throws {
         return
     }
     let application = NSApplication.shared
-    let delegate = AppDelegate(router: router)
+    let delegate = AppDelegate(resources: resources)
     application.setActivationPolicy(.accessory)
     application.delegate = delegate
     withExtendedLifetime(delegate) { application.run() }

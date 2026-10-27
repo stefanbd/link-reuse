@@ -2,17 +2,19 @@
 
 Private source repository: [stefanbd/link-reuse](https://github.com/stefanbd/link-reuse).
 
-OpenIn chooses the browser. A small native helper checks existing normal tabs before opening a link, selects a match without changing its current URL, or opens the original link normally. Arc includes tabs in its spaces. The active matching tab wins; otherwise exact URLs precede equivalent resource URLs.
+OpenIn chooses the browser and passes that choice to one native Link Reuse app. The app checks existing normal tabs before opening a link, selects a match without changing its current URL, or opens the original link normally. Arc includes tabs in its spaces. The active matching tab wins; otherwise exact URLs precede equivalent resource URLs.
 
 Supported native destinations: Arc, Chrome, Brave and Edge Beta. Explicit OpenIn profile/private routes and unsupported browsers retain their original handling. This handles external links routed through OpenIn; ordinary webpage clicks are not intercepted.
 
 ## Runtime components
 
-- One Swift implementation, compiled into the four browser-specific app bundles in `~/Applications/Link Reuse`.
-- The same compiled program installed as `~/src/link-reuse/native-host`, invoked directly by Chromium native messaging. It does not use a shell launcher or Python. A standalone executable keeps the recorder separate from macOS application URL delivery.
-- One Manifest V3 extension in `~/src/link-reuse/extension`. It observes navigation, reads canonical metadata, and sends bounded updates over the native connection.
+- One native `~/Applications/Link Reuse.app` handles all configured browsers. It receives `linkreuse://open/<browser>?url=<encoded-original-url>` from OpenIn, validates the request and reuses the existing matching implementation.
+- The app includes `Contents/Helpers/LinkReuseHost`, the same Swift implementation running as the native-messaging recorder. Browsers launch it directly; no shell or Python interpreter is involved.
+- One shared Manifest V3 extension is bundled at `Contents/Resources/extension`. A folder shortcut at `~/Applications/Link Reuse Extension` makes it selectable in the browser's Load unpacked dialog.
 
-Python is used only for development/build/install/test scripts; no Python recorder runs during use. There is no server, network resolver, login item or LaunchAgent.
+Python is used only for development/build/install/test scripts. There is no web server, network resolver, login item or LaunchAgent. Chromium owns each native-messaging connection and its recorder process; one app installation does not imply one OS process across all browser profiles.
+
+`browsers.json` is the browser catalog used by the build. Only installed browsers are included in the app, with their compiled adapters. The manifest public key fixes the extension ID across accounts and installation paths; the build derives the allowed native origin from that key. Installed operation does not depend on the source checkout.
 
 ## Matching and live-tab learning
 
@@ -46,43 +48,46 @@ The extension popup reports the stored count/size and provides **Forget learned 
 
 ## Process lifetime
 
-A helper starts when OpenIn sends it a link. The most recently active supported browser keeps its helper warm, including while you work in another non-browser app. Helpers for other browsers exit after two minutes without relevant activity. A helper also exits when its browser quits, once any queued open request finishes. Opening another link launches it again as needed.
+The routing app starts when OpenIn sends its first request. It stays warm while any configured browser runs and exits when the last one closes, after queued requests finish. It does not track the active browser or run idle-retirement timers.
 
-The Swift recorder is launched by the extension and blocks on its native-message pipe between events. Its connection keeps the extension worker alive. Neither is a zero-memory process; the design avoids a cold recorder launch on every observation. Browser-native tab queries happen when opening a link; extension tab snapshots happen on relevant navigation/closure events.
+The Swift recorder is launched by the extension and blocks on its native-message pipe between events. Its connection keeps the extension worker alive. Browser-native tab queries happen when opening a link; extension tab snapshots happen on relevant navigation/closure events.
 
 ## Installation and updates
 
-The repository contains the Swift and extension source, AppleScript adapters, build/install scripts and tests. Generated app bundles, the installed `native-host` binary, local backups, browser settings and learned URL data are excluded from Git.
-
-To restore the source on this Mac after moving aside any existing checkout:
+Requirements: macOS 14 or newer, Xcode command-line tools with Swift 6, Python 3, and at least one supported browser installed at a path in `browsers.json`. Node.js is needed only for extension tests.
 
 ```sh
 gh repo clone stefanbd/link-reuse ~/src/link-reuse
 cd ~/src/link-reuse
+python3 verify.py
 python3 build.py
+python3 install.py
 ```
 
-Building requires macOS, Xcode command-line tools with Swift 6, Python 3, and the four browser applications at the paths in `build.py`. Node.js runs the extension unit tests. For a fresh installation only, run `python3 install.py`, then `python3 install_redirects.py`, and load the unpacked extension as described below. Existing helper apps are deliberately not overwritten by `install.py`.
+`build.py` compiles the shared Swift program once, packages the app, compiles adapters for installed browsers, bundles the extension and signs/verifies the native code. `install.py` installs the app and registers its bundled recorder for those browsers. It refuses to overwrite an existing app; for an update, quit Link Reuse and move the old app aside first.
 
-This is the current personal Mac setup: keep the installed extension at the documented path. Chromium derives the unpacked extension ID from that path, and `NativeHost.extensionOrigin` restricts the recorder to the current ID. A different account or installation path requires reconciling that constant with the ID printed by `install_redirects.py`, then rebuilding and reinstalling. OpenIn routing is configured separately; rebuilding source does not change it.
+In each browser, open `chrome://extensions`, enable Developer mode, select **Load unpacked**, and choose `~/Applications/Link Reuse Extension`. In the file picker, Command–Shift–G opens Go to Folder; enter `~/Applications`, then select **Link Reuse Extension**. Version 3 has stable ID `dkkfdmgdgomngkkoaaolokhechagdlfl`. Upgrading from version 2 requires removing the old extension once, then loading this one. Subsequent updates keep the ID and only need Reload.
 
-In each supported browser, open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select `/Users/stefandichev/src/link-reuse/extension`. Reload the extension after updates. Version 2 uses `tabs` permission to enumerate current URLs and prune closed-tab relationships; it does not use the browser history API or extension storage.
+The extension uses `tabs`, `webNavigation` and `nativeMessaging`; it does not use saved browser history. Arc has the extension installed. Chrome, Brave and Edge Beta need their own extension load for redirect/canonical learning; their ordinary URL and Maps identity matching work independently.
 
-Arc has been the configured extension browser. Chrome, Brave and Edge Beta need their own manual extension load for learning; their native helpers support ordinary URL and Maps identity matching independently.
+OpenIn remains the default HTTP/HTTPS handler. Each eligible browser destination retains its name and rule membership, points to the same Link Reuse app, and uses `openin-rewrite.js` with its browser ID substituted. Normal links therefore carry the chosen browser explicitly without adding a shell launch to the click path.
 
-`python3 build.py` uses Xcode's `swiftc`, `osacompile` and ad-hoc `codesign`. `install.py` performs an initial app install and refuses to overwrite existing apps. `install_redirects.py` copies the shared native executable and registers it for all four browsers. The native host identifies its actual parent browser because Arc uses Chrome's host registration on this machine.
+`python3 configure_openin.py --apply` applies that configuration to the tested OpenIn 4.5.2 database schema, makes a private backup, preserves rules/profile/private routes, and refuses to replace unrelated custom rewrites. It quits and reopens OpenIn. This is a separate, explicit setup step; rebuilding the app does not change routing. To undo a destination, select the real browser in OpenIn and disable its Link Reuse URL rewrite.
 
-OpenIn remains the default HTTP/HTTPS handler. Its eligible normal destinations point to the corresponding helper app. `configure_openin.py` is the existing backed-up, version-specific OpenIn database configuration script; upgrades to the helper do not require running it again. To undo a route, select the original browser destination in OpenIn.
+Old helper apps may be archived after verifying the new OpenIn route. The installer stages bounded old relationships through the existing one-time migration mechanism; the new recorder imports only destinations represented by current tabs and deletes the staging file. Runtime caches, migration files, compiled binaries and settings backups are excluded from Git.
 
 ## Verification
 
-- `node --test test_redirects.mjs test_canonical.mjs test_learning.mjs test_bridge.mjs`
-- Compile/run `test_url_matching.swift` with `URLMatching.swift`.
-- Compile/run `test_learning.swift` with `URLMatching.swift`, `LearningPolicy.swift`, `LearningStore.swift` and `NativeHost.swift`.
-- `python3 test_routing.py`: exact reuse in the four browsers using temporary local pages.
-- `python3 test_redirect_integration.py`: actual redirect learning, same-tab reuse with no extra page requests, and pruning after closure through OpenIn into Arc.
-- `python3 test_resource_integration.py`: canonical reviews reuse, unrelated-item separation and pruning after navigation away or closure.
+- `python3 verify.py`: extension tests plus native resource matching, request validation, privacy, storage and framing tests. It does not open browsers.
+- `python3 test_routing.py`: exact same-tab/no-reload checks through the unified app in each installed browser.
+- `python3 test_routing.py Arc --openin`: the actual default OpenIn route.
+- `python3 test_redirect_integration.py`: real HTTP/JavaScript/SPA redirect learning and closure pruning through OpenIn into Arc, plus sensitive-link bypass.
+- `python3 test_resource_integration.py`: canonical deeper-page reuse, unrelated-item separation and pruning after navigation/closure.
+- `python3 test_lifetime.py`: temporary stand-in browser apps verify that the routing process survives one browser closing and exits after the last. Real browsers are left alone.
+- `python3 test_latency.py`: temporary local pages measure direct browser, helper and OpenIn opening paths, plus the native tab-lookup benchmark. These include browser/OS overhead and are not network-page load benchmarks.
 
-Unit checks cover shared privacy exclusions, hard count/byte bounds, queue saturation, late acknowledgements, clear/replay races, stale snapshot suppression, live-resource retention, dead-session rejection, private file modes, protocol framing and helper lifetime decisions. Runtime tests close only their own temporary pages.
+Runtime tests close only their own temporary pages. Safari and Firefox/Zen are not implemented or certified by these tests.
 
-Verified on 27 October 2026: 20 extension logic tests, 24 resource-matching checks, and native storage/privacy/lifecycle/framing checks passed. All four helpers passed exact-link same-tab/no-reload tests. Arc passed real HTTP, JavaScript and SPA redirect reuse and tab-close pruning; generic canonical reuse and cleanup after navigating away; sensitive-link bypass with the test token absent from storage; and preservation of the supplied Maps photo tab from both the search and base-place links. Inactive Chrome, Brave and Edge Beta helpers exited automatically while Arc remained warm. No Python recorder remained running.
+Verified on 27 October 2026: 20 extension tests, 24 native resource-matching checks, 32 OpenIn rewrite/request checks, and native storage/privacy/framing tests passed. The unified app passed same-tab/no-reload checks in all four installed browsers, the actual OpenIn-to-Arc route, HTTP/JavaScript/SPA redirect learning, canonical deeper-page reuse, closure/navigation pruning, sensitive-link bypass, the original Maps search/base links preserving the existing photo tab, and the isolated two-browser lifetime test.
+
+The small local timing sample used 20 native lookups and three new-page opens per path. Before/after medians in milliseconds were: native lookup **117 / 102**, direct Arc **346 / 312**, helper-to-Arc **467 / 502**, and OpenIn-to-Arc **887 / 701**. These are noisy local observations, not a guaranteed speedup or a general page-load benchmark.

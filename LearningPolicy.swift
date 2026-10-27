@@ -8,15 +8,13 @@ struct LearningPolicy: Decodable, Sendable {
     let maxPendingBytes: Int
     let maxBatchRecords: Int
     let maxSnapshotBytes: Int
-    let helperIdleSeconds: Double
     let blockedQueryKeys: [String]
     let blockedQueryPrefixes: [String]
     let blockedPathSegments: [String]
     let blockedHostPrefixes: [String]
 
     static func load(from url: URL? = nil) throws -> Self {
-        let file = url ?? Bundle.main.url(forResource: "learning-policy", withExtension: "json")
-            ?? URL(filePath: CommandLine.arguments[0]).deletingLastPathComponent().appending(path: "extension/learning-policy.json")
+        let file = url ?? AppResources.directory.appending(path: "extension/learning-policy.json")
         return try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
     }
 
@@ -40,12 +38,4 @@ struct LearningPolicy: Decodable, Sendable {
         }
         return true
     }
-}
-
-func helperExitDelay(preferred: Bool, browserRunning: Bool, handledLink: Bool, busy: Bool,
-                     idleFor: Double, idleLimit: Double) -> Double? {
-    if busy { return nil }
-    if handledLink && !browserRunning { return 0 }
-    if preferred && browserRunning { return nil }
-    return max(0, idleLimit - idleFor)
 }

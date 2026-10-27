@@ -19,12 +19,11 @@ struct NativeReply: Encodable {
 }
 
 enum NativeHost {
-    static let extensionOrigin = "chrome-extension://cjnlaniabigfgcpjhbjkfaghpeeomlbf/"
-
-    static func run(policy: LearningPolicy) throws {
-        guard CommandLine.arguments.dropFirst().first == extensionOrigin,
+    static func run(resources: AppResources) throws {
+        let policy = resources.policy
+        guard CommandLine.arguments.dropFirst().first == resources.extensionOrigin,
               let parent = NSRunningApplication(processIdentifier: getppid()),
-              let browser = parent.bundleIdentifier, supportedBrowsers.contains(browser),
+              let browser = parent.bundleIdentifier, resources.browsers.contains(where: { $0.bundleID == browser }),
               let started = parent.launchDate?.timeIntervalSince1970 else { throw POSIXError(.EPERM) }
         signal(SIGPIPE, SIG_IGN)
         let store = LearningStore(browserID: browser, policy: policy)
