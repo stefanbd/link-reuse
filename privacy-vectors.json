@@ -1,0 +1,19 @@
+[
+  {"url":"https://example.test/articles/42", "allowed":true},
+  {"url":"https://example.test/articles/42#reviews", "allowed":true},
+  {"url":"https://www.google.com/maps/search/?api=1&query=Place", "allowed":true},
+  {"url":"https://example.test/login", "allowed":false},
+  {"url":"https://example.test/OAuth2/callback?code=abc", "allowed":false},
+  {"url":"https://example.test/reset-password/abc", "allowed":false},
+  {"url":"https://example.test/%6cogin", "allowed":false},
+  {"url":"https://accounts.example.test/anything", "allowed":false},
+  {"url":"https://example.test/a?Access_Token=abc", "allowed":false},
+  {"url":"https://example.test/a?api%5Fkey=abc", "allowed":false},
+  {"url":"https://example.test/a?X-Amz-Signature=abc", "allowed":false},
+  {"url":"https://example.test/a?X-Goog-Credential=abc", "allowed":false},
+  {"url":"https://example.test/a#access_token=abc", "allowed":false},
+  {"url":"https://example.test/a#/auth/callback", "allowed":false},
+  {"url":"https://example.test/a#access%5Ftoken%3Dabc", "allowed":false},
+  {"url":"https://user:password@example.test/a", "allowed":false},
+  {"url":"file:///tmp/a", "allowed":false}
+]
