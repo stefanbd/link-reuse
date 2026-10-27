@@ -43,7 +43,7 @@ for browser in browsers:
 info = {
     'CFBundleIdentifier': 'me.dichev.LinkReuse', 'CFBundleName': 'Link Reuse',
     'CFBundleDisplayName': 'Link Reuse', 'CFBundleExecutable': 'LinkReuse',
-    'CFBundlePackageType': 'APPL', 'CFBundleVersion': '4', 'CFBundleShortVersionString': '3.0',
+    'CFBundlePackageType': 'APPL', 'CFBundleVersion': '5', 'CFBundleShortVersionString': '3.0.1',
     'LSMinimumSystemVersion': '14.0', 'LSUIElement': True,
     'NSAppleEventsUsageDescription': 'Find and select an existing browser tab before opening an external link.',
     'CFBundleURLTypes': [{'CFBundleURLName': 'Link Reuse request', 'CFBundleTypeRole': 'Viewer',
