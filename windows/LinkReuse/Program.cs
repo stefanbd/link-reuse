@@ -12,7 +12,11 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
-        if (args.SequenceEqual(new[] { "--self-test" })) return await SelfTest();
+        if (args.SequenceEqual(new[] { "--self-test" }))
+        {
+            try { return await SelfTest(); }
+            catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+        }
         if (!OperatingSystem.IsWindows()) { Console.Error.WriteLine("Link Reuse's native helper requires Windows."); return 1; }
         return await Run(args);
     }

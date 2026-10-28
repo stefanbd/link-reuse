@@ -20,7 +20,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet publish windows/LinkReuse/LinkReuse.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -o build/windows-native
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $result = Start-Process -FilePath "$PWD/build/windows-native/LinkReuse.exe" -ArgumentList '--self-test' -Wait -PassThru
+          $result = Start-Process -FilePath "$PWD/build/windows-native/LinkReuse.exe" -ArgumentList '--self-test' -Wait -PassThru -RedirectStandardOutput build/smoke-output.txt -RedirectStandardError build/smoke-error.txt
+          Get-Content build/smoke-output.txt
+          Get-Content build/smoke-error.txt
           if ($result.ExitCode -ne 0) { exit $result.ExitCode }
       - name: Package for installation
         shell: pwsh
