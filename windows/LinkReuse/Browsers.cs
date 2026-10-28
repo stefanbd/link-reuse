@@ -40,7 +40,7 @@ internal static class Browsers
         return Known.Keys.FirstOrDefault(id => Find(id) is not null) ?? throw new InvalidOperationException("Install Edge, Chrome or Brave first.");
     }
 
-    internal static string ParentBrowser()
+    internal static (string Browser, int ProcessId) ParentBrowser()
     {
         var snapshot = CreateToolhelp32Snapshot(2, 0);
         if (snapshot == new IntPtr(-1)) throw new InvalidOperationException("Cannot identify the browser.");
@@ -56,7 +56,7 @@ internal static class Browsers
             for (var depth = 0; depth < 8 && parents.TryGetValue(id, out var process); depth++)
             {
                 var browser = Known.FirstOrDefault(value => value.Value.Exe.Equals(process.Name, StringComparison.OrdinalIgnoreCase)).Key;
-                if (browser is not null) return browser;
+                if (browser is not null) return (browser, (int)id);
                 id = process.Parent;
             }
         }

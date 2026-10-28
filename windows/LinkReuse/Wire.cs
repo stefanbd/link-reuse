@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace LinkReuse;
 
 internal sealed record Message(string Type, string? Id = null, string? Url = null, string? Error = null, string? Result = null);
-internal sealed record Session(string Pipe, string Browser, int ProcessId, long Started, long Created);
+internal sealed record Session(string Pipe, string Browser, int ProcessId, long Started, long Created, int BrowserProcessId);
 internal sealed record Settings(string Browser);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

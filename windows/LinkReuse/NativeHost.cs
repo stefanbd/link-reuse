@@ -21,10 +21,10 @@ internal sealed class NativeHost
         var input = Console.OpenStandardInput();
         using var greetingTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         if ((await Wire.Read(input, greetingTimeout.Token))?.Type != "hello") throw new InvalidDataException("Missing extension greeting.");
-        var browser = Browsers.ParentBrowser();
+        var (browser, browserProcessId) = Browsers.ParentBrowser();
         Directory.CreateDirectory(Registration.Sessions);
         using var process = Process.GetCurrentProcess();
-        var session = new Session("linkreuse-" + Guid.NewGuid().ToString("N"), browser, process.Id, process.StartTime.ToUniversalTime().Ticks, DateTime.UtcNow.Ticks);
+        var session = new Session("linkreuse-" + Guid.NewGuid().ToString("N"), browser, process.Id, process.StartTime.ToUniversalTime().Ticks, DateTime.UtcNow.Ticks, browserProcessId);
         var file = Path.Combine(Registration.Sessions, session.Pipe + ".json");
         var listener = Listen(session.Pipe);
         try
@@ -133,10 +133,7 @@ internal sealed class NativeHost
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
         await using var pipe = new NamedPipeClientStream(".", sessions[0].Pipe, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         await pipe.ConnectAsync(1000, timeout.Token);
-        foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(Browsers.Known[browser].Exe)))
-        {
-            using (process) AllowSetForegroundWindow((uint)process.Id);
-        }
+        AllowSetForegroundWindow((uint)sessions[0].BrowserProcessId);
         await Wire.Write(pipe, new Message("open", Url: url), timeout.Token);
         var response = await Wire.Read(pipe, timeout.Token);
         if (response is null) throw new IOException("The browser connection ended. Check whether the link opened before trying again.");
