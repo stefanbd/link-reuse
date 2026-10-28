@@ -1,0 +1,31 @@
+{
+  "version": "0.1.0",
+  "description": "Reuse an existing browser tab before opening an external web link.",
+  "homepage": "https://github.com/stefanbd/link-reuse",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/stefanbd/link-reuse/releases/download/windows-v0.1.0/link-reuse-windows-x64-0.1.0.zip",
+      "hash": "a0a0d4d2e8ece50357adcc0481ddac7ba904dab89732ccd71e7e2b834b7cba0f"
+    }
+  },
+  "bin": [
+    [
+      "LinkReuse.exe",
+      "link-reuse"
+    ]
+  ],
+  "post_install": [
+    "if ($global) { throw 'Install Link Reuse for the current user, without --global.' }",
+    "$result = Start-Process -FilePath \"$dir\\LinkReuse.exe\" -ArgumentList '--install' -Wait -PassThru",
+    "if ($result.ExitCode -ne 0) { throw 'Link Reuse registration failed.' }"
+  ],
+  "pre_uninstall": [
+    "$result = Start-Process -FilePath \"$dir\\LinkReuse.exe\" -ArgumentList '--uninstall' -Wait -PassThru",
+    "if ($result.ExitCode -ne 0) { throw 'Link Reuse could not remove its browser registration.' }"
+  ],
+  "notes": [
+    "Run link-reuse --setup to load the bundled browser extension.",
+    "Run link-reuse --defaults to choose Link Reuse for HTTP/HTTPS, or add it to your existing router.",
+    "Reload the extension after updates. Select your real browser as default before uninstalling."
+  ]
+}
