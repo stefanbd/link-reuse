@@ -23,12 +23,13 @@ function browser(initial, windows = [{ id: 1, focused: true }], lastFocusedId = 
       async getAll() { return windows; },
       async getLastFocused() { return windows.find(window => window.id === lastFocusedId); },
       async update(id, change) { calls.push(['window', id, change]); },
+      async create(change) { calls.push(['create-window', change]); const tab = { id: tabs.length + 1, windowId: 1, status: 'loading', pendingUrl: change.url }; tabs.push(tab); windows.push({ id: 1, focused: true, state: 'normal' }); return { id: 1, tabs: [tab] }; },
     },
     tabs: {
       async query() { return tabs.map(tab => ({ ...tab })); },
       async get(id) { return { ...tabs.find(tab => tab.id === id) }; },
       async update(id, change) { calls.push(['focus', id, change]); },
-      async create(change) { calls.push(['create', change]); tabs.push({ id: tabs.length + 1, windowId: change.windowId, status: 'loading', pendingUrl: change.url }); },
+      async create(change) { calls.push(['create', change]); const tab = { id: tabs.length + 1, windowId: change.windowId, status: 'loading', pendingUrl: change.url }; tabs.push(tab); return tab; },
     },
   } };
 }
@@ -197,6 +198,85 @@ test('window recency ignores delayed older focus observations and discards close
   assert.deepEqual([...bridge.windowFocusOrder], [[1, 30], [2, 20]]);
   bridge.forgetWindow(1);
   assert.deepEqual([...bridge.windowFocusOrder], [[2, 20]]);
+});
+
+test('a Snowflake account launcher preserves an existing Snowsight worksheet without learning the login URL', async () => {
+  const launcher = 'https://example-marketing_test.snowflakecomputing.com/console/login#/';
+  const view = 'https://app.snowflake.com/example/marketing_test/#/worksheets/worksheet-42';
+  const learning = new LiveLearning(policy);
+  const h = browser([{ url: view, active: true }]);
+  assert.deepEqual(await routeToTab(launcher, learning, h.api), { result: 'focused' });
+  assert.deepEqual(await routeToTab(slackLink(launcher), learning, h.api), { result: 'focused' });
+  assert.deepEqual(h.calls.map(call => call[0]), ['focus', 'window', 'focus', 'window']);
+  assert.equal(h.tabs[0].url, view);
+  assert.equal(learning.records.size, 0);
+});
+
+test('a launched Snowflake sign-in tab is reused through OAuth without retaining authentication URLs', async () => {
+  const launcher = 'https://example-production.snowflakecomputing.com/console/login#/';
+  const wrapper = slackLink(launcher);
+  const oauth = 'https://example-production.snowflakecomputing.com/oauth/authorize?state=example&code_challenge=example';
+  const learning = new LiveLearning(policy);
+  const h = browser([]);
+  await routeToTab(wrapper, learning, h.api);
+  assert.deepEqual(await routeToTab(wrapper, learning, h.api), { result: 'focused' });
+  Object.assign(h.tabs[0], { url: oauth, pendingUrl: undefined, status: 'complete' });
+  assert.deepEqual(await routeToTab(launcher, learning, h.api), { result: 'focused' });
+  assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
+  assert.equal(h.tabs[0].url, oauth);
+  assert.equal(learning.settledURLs.size, 0);
+  assert.deepEqual([...learning.records.values()].map(({ bytes, ...record }) => record), [{ tabId: 1, account: 'snowflake-account:example/production' }]);
+  Object.assign(h.tabs[0], { url: 'https://app.snowflake.com/example/production/#/worksheets/42' });
+  assert.deepEqual(await routeToTab(launcher, learning, h.api), { result: 'focused' });
+  h.tabs[0].url = 'https://example.test/unrelated';
+  learning.prune(h.tabs);
+  assert.equal(learning.records.size, 0);
+});
+
+test('Snowflake account matching keeps different accounts, deep links and OAuth requests separate', async () => {
+  const launcher = 'https://example-production.snowflakecomputing.com/console/login#/';
+  const target = 'https://app.snowflake.com/example/production/#/worksheets/42';
+  const cases = [
+    [launcher, 'https://app.snowflake.com/example/testing/#/worksheets/42'],
+    [launcher, 'https://app.snowflake.com/another/production/'],
+    [launcher, 'https://example-production.snowflakecomputing.com/oauth/authorize?state=unrelated-flow'],
+    [launcher + '?state=example', target],
+    ['https://example-production.snowflakecomputing.com/oauth/authorize?state=example', target],
+    ['https://app.snowflake.com/example/production/#/worksheets/43', target],
+    [launcher.replace('snowflakecomputing.com', 'snowflakecomputing.com.example.test'), target],
+  ];
+  for (const [request, open] of cases) {
+    const h = browser([{ url: open }]);
+    assert.deepEqual(await routeToTab(request, new LiveLearning(policy), h.api), { result: 'opened' });
+    assert.equal(h.calls.find(call => call[0] === 'create')[1].url, request);
+  }
+  const h = browser([{ url: target, incognito: true }]);
+  assert.deepEqual(await routeToTab(launcher, new LiveLearning(policy), h.api), { result: 'opened' });
+});
+
+test('Snowflake launched-tab records share storage limits and are pruned on closure or account changes', async () => {
+  const learning = new LiveLearning({ ...policy, maxRecords: 2, maxCacheBytes: 600 });
+  const h = browser([]);
+  for (let i = 0; i < 5; i++) await routeToTab(`https://example-account${i}.snowflakecomputing.com/console/login#/`, learning, h.api);
+  assert.equal(learning.records.size, 2);
+  assert.ok(learning.bytes <= 600);
+  h.tabs[4].pendingUrl = 'https://app.snowflake.com/example/another/';
+  learning.prune(h.tabs);
+  assert.equal(learning.records.size, 1);
+  learning.prune([]);
+  assert.equal(learning.records.size, 0);
+  assert.equal(learning.bytes, 0);
+});
+
+test('a Snowflake launcher also tracks the first tab created in a new browser window', async () => {
+  const launcher = 'https://example-production.snowflakecomputing.com/console/login#/';
+  const h = browser([], []);
+  const learning = new LiveLearning(policy);
+  await routeToTab(launcher, learning, h.api);
+  h.tabs[0].pendingUrl = 'https://example-production.snowflakecomputing.com/oauth/authorize?state=example';
+  assert.deepEqual(await routeToTab(launcher, learning, h.api), { result: 'focused' });
+  assert.equal(h.calls.filter(call => call[0] === 'create-window').length, 1);
+  assert.equal(h.tabs.length, 1);
 });
 
 test('the extension reconnects automatically after an installed helper is replaced', async context => {

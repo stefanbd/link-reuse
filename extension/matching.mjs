@@ -39,6 +39,28 @@ export function equivalent(left, right, records) {
   return [...resourceKeys(right, records)].some(key => keys.has(key));
 }
 
+function snowflakeAccount(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
+    const named = url.hostname.match(/^([a-z][a-z0-9]*)-([a-z0-9_-]+)\.snowflakecomputing\.com$/);
+    const app = url.hostname === 'app.snowflake.com' && url.pathname.toLowerCase().match(/^\/([a-z][a-z0-9]*)\/([a-z0-9_-]+)(?:\/|$)/);
+    const match = named || app;
+    return match ? 'snowflake-account:' + match[1] + '/' + match[2].replace(/_/g, '-') : null;
+  } catch { return null; }
+}
+
+function snowflakeLauncher(value, policy) {
+  try {
+    if (typeof value !== 'string' || value.length > policy.maxURLBytes) return null;
+    const url = new URL(value);
+    const account = snowflakeAccount(value);
+    if (!account || url.search || !['', '#', '#/'].includes(url.hash)) return null;
+    const landing = url.hostname === 'app.snowflake.com' ? /^\/[^/]+\/[^/]+\/?$/ : /^\/(?:console\/(?:login\/?)?)?$/;
+    return landing.test(url.pathname) ? account : null;
+  } catch { return null; }
+}
+
 function slackLinkTarget(value, policy) {
   try {
     if (typeof value !== 'string' || value.length > policy.maxURLBytes) return null;
@@ -53,7 +75,7 @@ function slackLinkTarget(value, policy) {
     // This unverified claim is only a lookup hint, never authentication or a replacement navigation URL.
     const target = payload['https://slack.com/target_uri'];
     return header.alg === 'RS256' && header.typ === 'JWT' && payload.iss === 'https://slack.com' &&
-      allowsLearning(target, policy) ? urlKey(target) : null;
+      (allowsLearning(target, policy) || snowflakeLauncher(target, policy)) ? urlKey(target) : null;
   } catch { return null; }
 }
 
@@ -63,29 +85,41 @@ export class LiveLearning {
     for (const record of records) {
       if (!['redirect', 'canonical'].includes(record.kind) || !allowsLearning(record.source, this.policy)) continue;
       const key = record.kind + '\n' + urlKey(record.source);
-      this.remove(key);
-      if (record.destination === null || !allowsLearning(record.destination, this.policy)) continue;
-      const value = { source: urlKey(record.source), destination: urlKey(record.destination) };
-      value.bytes = new TextEncoder().encode(JSON.stringify(value)).length + 32;
-      this.records.set(key, value);
-      this.bytes += value.bytes;
-      while (this.records.size > this.policy.maxRecords || this.bytes > this.policy.maxCacheBytes) this.remove(this.records.keys().next().value);
+      if (record.destination === null || !allowsLearning(record.destination, this.policy)) { this.remove(key); continue; }
+      this.put(key, { source: urlKey(record.source), destination: urlKey(record.destination) });
     }
+  }
+  put(key, value) {
+    this.remove(key);
+    value.bytes = new TextEncoder().encode(JSON.stringify(value)).length + 32;
+    this.records.set(key, value);
+    this.bytes += value.bytes;
+    while (this.records.size > this.policy.maxRecords || this.bytes > this.policy.maxCacheBytes) this.remove(this.records.keys().next().value);
   }
   prune(tabs) {
     const live = new Set();
-    const ids = new Set(tabs.map(tab => tab.id));
-    for (const id of this.settledURLs.keys()) if (!ids.has(id)) this.settledURLs.delete(id);
+    const byId = new Map(tabs.map(tab => [tab.id, tab]));
+    for (const id of this.settledURLs.keys()) if (!byId.has(id)) this.settledURLs.delete(id);
     for (const tab of tabs) if (!tab.incognito) {
       const url = tab.pendingUrl || tab.url;
       const previous = this.settledURLs.get(tab.id);
-      if (tab.status === 'complete') this.settledURLs.set(tab.id, url);
+      if (tab.status === 'complete') {
+        if (allowsLearning(url, this.policy)) this.settledURLs.set(tab.id, url);
+        else this.settledURLs.delete(tab.id);
+      }
       const candidates = tab.status === 'loading' && previous ? [url, previous] : [url];
       for (const candidate of candidates) if (allowsLearning(candidate, this.policy)) {
         for (const key of resourceKeys(candidate, this.records)) live.add(key);
       }
     }
     for (const [key, record] of this.records) {
+      if (key.startsWith('launch\n')) {
+        const tab = byId.get(record.tabId);
+        const current = tab && (tab.pendingUrl || tab.url);
+        const account = snowflakeAccount(current) || snowflakeLauncher(slackLinkTarget(current, this.policy), this.policy);
+        if (!tab || tab.incognito || account !== record.account) this.remove(key);
+        continue;
+      }
       if (![...resourceKeys(record.destination, this.records)].some(value => live.has(value))) this.remove(key);
     }
   }
@@ -106,23 +140,35 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   const tabs = await browser.tabs.query({ windowType: 'normal' });
   learning.prune(tabs);
   const lookupURL = slackLinkTarget(url, learning.policy) || url;
-  const available = tabs.filter(tab => !tab.incognito && allowsLearning(tab.pendingUrl || tab.url, learning.policy));
+  const account = snowflakeLauncher(lookupURL, learning.policy);
+  const matches = value => account ? (snowflakeAccount(value) || snowflakeLauncher(slackLinkTarget(value, learning.policy), learning.policy)) === account :
+    equivalent(lookupURL, value, learning.records);
+  const available = tabs.filter(tab => !tab.incognito && (allowsLearning(tab.pendingUrl || tab.url, learning.policy) ||
+    (account && snowflakeLauncher(tab.pendingUrl || tab.url, learning.policy) === account) ||
+    (account && learning.records.get('launch\n' + tab.id)?.account === account && matches(tab.pendingUrl || tab.url))));
   const preferred = available.find(tab => tab.active && tab.windowId === window?.id);
-  const match = allowsLearning(lookupURL, learning.policy) && (
-    (preferred && equivalent(lookupURL, preferred.pendingUrl || preferred.url, learning.records) && preferred) ||
+  const match = (account || allowsLearning(lookupURL, learning.policy)) && (
+    (preferred && matches(preferred.pendingUrl || preferred.url) && preferred) ||
     available.find(tab => urlKey(tab.pendingUrl || tab.url) === urlKey(lookupURL)) ||
-    available.find(tab => equivalent(lookupURL, tab.pendingUrl || tab.url, learning.records))
+    available.find(tab => matches(tab.pendingUrl || tab.url))
   );
   if (match) {
     const current = await browser.tabs.get(match.id);
-    if (current.incognito || !equivalent(lookupURL, current.pendingUrl || current.url, learning.records)) throw new Error('The matching tab changed. Please open the link again.');
+    if (current.incognito || !matches(current.pendingUrl || current.url) || (!allowsLearning(current.pendingUrl || current.url, learning.policy) &&
+        snowflakeLauncher(current.pendingUrl || current.url, learning.policy) !== account &&
+        learning.records.get('launch\n' + current.id)?.account !== account)) throw new Error('The matching tab changed. Please open the link again.');
     await browser.tabs.update(match.id, { active: true });
     await activateWindow(match.windowId);
     return { result: 'focused' };
   }
   if (window) {
-    await browser.tabs.create({ windowId: window.id, url, active: true });
+    const created = await browser.tabs.create({ windowId: window.id, url, active: true });
+    if (account && Number.isInteger(created?.id)) learning.put('launch\n' + created.id, { tabId: created.id, account });
     await activateWindow(window.id);
-  } else await browser.windows.create({ url, incognito: false, type: 'normal', focused: true });
+  } else {
+    const created = await browser.windows.create({ url, incognito: false, type: 'normal', focused: true });
+    const tab = created.tabs?.[0];
+    if (account && Number.isInteger(tab?.id)) learning.put('launch\n' + tab.id, { tabId: tab.id, account });
+  }
   return { result: 'opened' };
 }
