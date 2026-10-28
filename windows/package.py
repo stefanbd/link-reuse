@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('executable', type=pathlib.Path)
 parser.add_argument('--output', type=pathlib.Path, default=ROOT / 'build/windows')
-parser.add_argument('--version', default='0.1.2')
+parser.add_argument('--version', default='0.1.3')
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 archive = args.output / f'link-reuse-windows-x64-{args.version}.zip'

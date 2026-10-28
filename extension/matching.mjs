@@ -1,86 +1,58 @@
 import { allowsLearning } from './learning.mjs';
+import { urlRules } from './url-rules.mjs';
 
-export function urlKey(value) {
+function urlKey(value) {
   try {
     const url = new URL(value);
     return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
   } catch { return null; }
 }
 
-export function mapsPlaceKey(value) {
-  try {
-    const url = new URL(value);
-    if (!['google.com', 'www.google.com', 'maps.google.com'].includes(url.hostname) ||
-        url.port || url.username || url.password || !url.pathname.startsWith('/maps/place/')) return null;
-    const ids = new Set([...url.pathname.toLowerCase().matchAll(/!4m\d+!3m\d+!1s(0x[0-9a-f]+:0x[0-9a-f]+)(?=!|$)/g)].map(match => match[1]));
-    return ids.size === 1 ? 'google-maps-place:' + [...ids][0] : null;
-  } catch { return null; }
-}
-
-export function resourceKeys(value, records) {
-  const keys = new Set();
-  const pending = [urlKey(value)];
-  while (pending.length && keys.size < 64) {
-    const key = pending.pop();
-    if (!key || keys.has(key)) continue;
-    keys.add(key);
-    const place = mapsPlaceKey(key);
-    if (place) keys.add(place);
-    for (const kind of ['redirect', 'canonical']) {
-      const destination = records.get(kind + '\n' + key)?.destination;
-      if (destination) pending.push(destination);
-    }
-  }
-  return keys;
-}
-
-export function equivalent(left, right, records) {
-  const keys = resourceKeys(left, records);
-  return [...resourceKeys(right, records)].some(key => keys.has(key));
-}
-
-function snowflakeAccount(value) {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
-    const named = url.hostname.match(/^([a-z][a-z0-9]*)-([a-z0-9_-]+)\.snowflakecomputing\.com$/);
-    const app = url.hostname === 'app.snowflake.com' && url.pathname.toLowerCase().match(/^\/([a-z][a-z0-9]*)\/([a-z0-9_-]+)(?:\/|$)/);
-    const match = named || app;
-    return match ? 'snowflake-account:' + match[1] + '/' + match[2].replace(/_/g, '-') : null;
-  } catch { return null; }
-}
-
-function snowflakeLauncher(value, policy) {
-  try {
-    if (typeof value !== 'string' || value.length > policy.maxURLBytes) return null;
-    const url = new URL(value);
-    const account = snowflakeAccount(value);
-    if (!account || url.search || !['', '#', '#/'].includes(url.hash)) return null;
-    const landing = url.hostname === 'app.snowflake.com' ? /^\/[^/]+\/[^/]+\/?$/ : /^\/(?:console\/(?:login\/?)?)?$/;
-    return landing.test(url.pathname) ? account : null;
-  } catch { return null; }
-}
-
-function slackLinkTarget(value, policy) {
-  try {
-    if (typeof value !== 'string' || value.length > policy.maxURLBytes) return null;
-    const url = new URL(value);
-    if (url.origin !== 'https://slack.com' || url.username || url.password ||
-        url.pathname !== '/openid/connect/login_initiate_redirect') return null;
-    const hints = url.searchParams.getAll('login_hint');
-    if (hints.length !== 1 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(hints[0])) return null;
-    const decode = part => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
-      Uint8Array.from(atob(part.replace(/-/g, '+').replace(/_/g, '/')), character => character.charCodeAt(0))));
-    const [header, payload] = hints[0].split('.').slice(0, 2).map(decode);
-    // This unverified claim is only a lookup hint, never authentication or a replacement navigation URL.
-    const target = payload['https://slack.com/target_uri'];
-    return header.alg === 'RS256' && header.typ === 'JWT' && payload.iss === 'https://slack.com' &&
-      (allowsLearning(target, policy) || snowflakeLauncher(target, policy)) ? urlKey(target) : null;
-  } catch { return null; }
-}
-
 export class LiveLearning {
-  constructor(policy) { this.policy = policy; this.records = new Map(); this.settledURLs = new Map(); this.bytes = 0; }
+  constructor(policy, rules = urlRules) {
+    this.policy = policy; this.rules = rules; this.records = new Map(); this.settledURLs = new Map(); this.bytes = 0;
+  }
+  resolve(value) {
+    const original = urlKey(value);
+    const direct = original ? this.rules(original, this.policy) : {};
+    const target = urlKey(direct.target);
+    const url = target || original;
+    const format = target ? this.rules(target, this.policy) : direct;
+    return { url, allowed: allowsLearning(url, this.policy), entry: format.entry, scope: format.scope, directEntry: direct.entry };
+  }
+  keys(value) {
+    const keys = new Set();
+    const pending = [urlKey(value)];
+    while (pending.length && keys.size < 64) {
+      const key = pending.pop();
+      if (!key || keys.has(key)) continue;
+      keys.add(key);
+      const identity = this.rules(key, this.policy).identity;
+      if (identity) keys.add(identity);
+      for (const kind of ['redirect', 'canonical']) {
+        const destination = this.records.get(kind + '\n' + key)?.destination;
+        if (destination) pending.push(destination);
+      }
+    }
+    return keys;
+  }
+  equivalent(left, right) {
+    const keys = this.keys(left);
+    return [...this.keys(right)].some(key => keys.has(key));
+  }
+  matches(request, tab) {
+    if (!tab || tab.incognito || (!request.allowed && !request.entry)) return false;
+    const value = tab.pendingUrl || tab.url;
+    if (request.entry) {
+      const current = this.resolve(value);
+      return current.scope === request.entry && (allowsLearning(value, this.policy) || current.directEntry === request.entry ||
+        this.records.get('launch\n' + tab.id)?.entry === request.entry);
+    }
+    return allowsLearning(value, this.policy) && this.equivalent(request.url, value);
+  }
+  rememberLaunch(tabId, request) {
+    if (request.entry && Number.isInteger(tabId)) this.put('launch\n' + tabId, { tabId, entry: request.entry });
+  }
   observe(records) {
     for (const record of records) {
       if (!['redirect', 'canonical'].includes(record.kind) || !allowsLearning(record.source, this.policy)) continue;
@@ -109,18 +81,16 @@ export class LiveLearning {
       }
       const candidates = tab.status === 'loading' && previous ? [url, previous] : [url];
       for (const candidate of candidates) if (allowsLearning(candidate, this.policy)) {
-        for (const key of resourceKeys(candidate, this.records)) live.add(key);
+        for (const key of this.keys(candidate)) live.add(key);
       }
     }
     for (const [key, record] of this.records) {
       if (key.startsWith('launch\n')) {
         const tab = byId.get(record.tabId);
-        const current = tab && (tab.pendingUrl || tab.url);
-        const account = snowflakeAccount(current) || snowflakeLauncher(slackLinkTarget(current, this.policy), this.policy);
-        if (!tab || tab.incognito || account !== record.account) this.remove(key);
+        if (!this.matches({ entry: record.entry }, tab)) this.remove(key);
         continue;
       }
-      if (![...resourceKeys(record.destination, this.records)].some(value => live.has(value))) this.remove(key);
+      if (![...this.keys(record.destination)].some(value => live.has(value))) this.remove(key);
     }
   }
   remove(key) { const value = this.records.get(key); if (value) { this.bytes -= value.bytes; this.records.delete(key); } }
@@ -139,36 +109,21 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   });
   const tabs = await browser.tabs.query({ windowType: 'normal' });
   learning.prune(tabs);
-  const lookupURL = slackLinkTarget(url, learning.policy) || url;
-  const account = snowflakeLauncher(lookupURL, learning.policy);
-  const matches = value => account ? (snowflakeAccount(value) || snowflakeLauncher(slackLinkTarget(value, learning.policy), learning.policy)) === account :
-    equivalent(lookupURL, value, learning.records);
-  const available = tabs.filter(tab => !tab.incognito && (allowsLearning(tab.pendingUrl || tab.url, learning.policy) ||
-    (account && snowflakeLauncher(tab.pendingUrl || tab.url, learning.policy) === account) ||
-    (account && learning.records.get('launch\n' + tab.id)?.account === account && matches(tab.pendingUrl || tab.url))));
-  const preferred = available.find(tab => tab.active && tab.windowId === window?.id);
-  const match = (account || allowsLearning(lookupURL, learning.policy)) && (
-    (preferred && matches(preferred.pendingUrl || preferred.url) && preferred) ||
-    available.find(tab => urlKey(tab.pendingUrl || tab.url) === urlKey(lookupURL)) ||
-    available.find(tab => matches(tab.pendingUrl || tab.url))
-  );
+  const request = learning.resolve(url);
+  const preferred = tabs.find(tab => tab.active && tab.windowId === window?.id);
+  const match = (preferred && learning.matches(request, preferred) && preferred) ||
+    tabs.find(tab => urlKey(tab.pendingUrl || tab.url) === request.url && learning.matches(request, tab)) ||
+    tabs.find(tab => learning.matches(request, tab));
   if (match) {
     const current = await browser.tabs.get(match.id);
-    if (current.incognito || !matches(current.pendingUrl || current.url) || (!allowsLearning(current.pendingUrl || current.url, learning.policy) &&
-        snowflakeLauncher(current.pendingUrl || current.url, learning.policy) !== account &&
-        learning.records.get('launch\n' + current.id)?.account !== account)) throw new Error('The matching tab changed. Please open the link again.');
+    if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
     await browser.tabs.update(match.id, { active: true });
     await activateWindow(match.windowId);
     return { result: 'focused' };
   }
-  if (window) {
-    const created = await browser.tabs.create({ windowId: window.id, url, active: true });
-    if (account && Number.isInteger(created?.id)) learning.put('launch\n' + created.id, { tabId: created.id, account });
-    await activateWindow(window.id);
-  } else {
-    const created = await browser.windows.create({ url, incognito: false, type: 'normal', focused: true });
-    const tab = created.tabs?.[0];
-    if (account && Number.isInteger(tab?.id)) learning.put('launch\n' + tab.id, { tabId: tab.id, account });
-  }
+  const created = window ? await browser.tabs.create({ windowId: window.id, url, active: true }) :
+    (await browser.windows.create({ url, incognito: false, type: 'normal', focused: true })).tabs?.[0];
+  learning.rememberLaunch(created?.id, request);
+  if (window) await activateWindow(window.id);
   return { result: 'opened' };
 }

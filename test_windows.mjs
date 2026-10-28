@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { LiveLearning, equivalent, routeToTab } from './extension/matching.mjs';
+import { LiveLearning, routeToTab } from './extension/matching.mjs';
 import { WindowsBridge } from './extension/windows-bridge.mjs';
+import { urlRules } from './extension/url-rules.mjs';
 
 const policy = JSON.parse(readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
 const place = 'https://www.google.com/maps/place/Restaurant/@42,23,17z/data=!4m6!3m5!1s0x40aa8541e3d5da63:0x5353ef1753a6f43c!8m2!3d42';
@@ -64,6 +65,19 @@ test('Windows focuses the existing deeper view without navigating or creating a 
   assert.equal(h.tabs[0].url, photo);
 });
 
+test('place identity rules reject another place, conflicting identities and lookalike URLs', async () => {
+  const candidates = [
+    photo.replace('0x40aa8541e3d5da63:0x5353ef1753a6f43c', '0xabc:0xdef'),
+    photo + '!4m6!3m5!1s0xabc:0xdef',
+    photo.replace('www.google.com', 'www.google.com.example.test'),
+    photo.replace('/maps/place/', '/maps/dir/'),
+  ];
+  for (const url of candidates) {
+    const h = browser([{ url }]);
+    assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api), { result: 'opened' });
+  }
+});
+
 test('external new links prefer the most recently used visible window over a last-focused minimized window', async () => {
   const windows = [
     { id: 1, focused: false, state: 'minimized' },
@@ -97,12 +111,12 @@ test('learned redirects and canonicals stay only while the resource is open', ()
   const learning = new LiveLearning(policy);
   learning.observe([{ kind: 'redirect', source: 'https://maps.test/search', destination: place }]);
   learning.prune([{ id: 1, url: photo, status: 'complete' }]);
-  assert.ok(equivalent('https://maps.test/search', photo, learning.records));
+  assert.ok(learning.equivalent('https://maps.test/search', photo));
   learning.prune([]);
   assert.equal(learning.records.size, 0);
   learning.observe([{ kind: 'canonical', source: 'https://shop.test/products/42/reviews', destination: 'https://shop.test/products/42' }]);
-  assert.ok(equivalent('https://shop.test/products/42', 'https://shop.test/products/42/reviews', learning.records));
-  assert.equal(equivalent('https://shop.test/products/43', 'https://shop.test/products/42/reviews', learning.records), false);
+  assert.ok(learning.equivalent('https://shop.test/products/42', 'https://shop.test/products/42/reviews'));
+  assert.equal(learning.equivalent('https://shop.test/products/43', 'https://shop.test/products/42/reviews'), false);
 });
 
 test('loading transitions keep learning until the new document settles', () => {
@@ -212,6 +226,14 @@ test('a Snowflake account launcher preserves an existing Snowsight worksheet wit
   assert.equal(learning.records.size, 0);
 });
 
+test('final revalidation rejects a tab that changed into an unrelated authentication flow', async () => {
+  const h = browser([{ url: 'https://app.snowflake.com/example/production/#/worksheets/42' }]);
+  h.api.tabs.get = async id => ({ id, windowId: 1, incognito: false,
+    url: 'https://example-production.snowflakecomputing.com/oauth/authorize?state=another-flow' });
+  await assert.rejects(routeToTab('https://example-production.snowflakecomputing.com/console/login#/', new LiveLearning(policy), h.api), /matching tab changed/);
+  assert.equal(h.calls.length, 0);
+});
+
 test('a launched Snowflake sign-in tab is reused through OAuth without retaining authentication URLs', async () => {
   const launcher = 'https://example-production.snowflakecomputing.com/console/login#/';
   const wrapper = slackLink(launcher);
@@ -225,7 +247,7 @@ test('a launched Snowflake sign-in tab is reused through OAuth without retaining
   assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
   assert.equal(h.tabs[0].url, oauth);
   assert.equal(learning.settledURLs.size, 0);
-  assert.deepEqual([...learning.records.values()].map(({ bytes, ...record }) => record), [{ tabId: 1, account: 'snowflake-account:example/production' }]);
+  assert.deepEqual([...learning.records.values()].map(({ bytes, ...record }) => record), [{ tabId: 1, entry: 'snowflake-account:example/production' }]);
   Object.assign(h.tabs[0], { url: 'https://app.snowflake.com/example/production/#/worksheets/42' });
   assert.deepEqual(await routeToTab(launcher, learning, h.api), { result: 'focused' });
   h.tabs[0].url = 'https://example.test/unrelated';
@@ -277,6 +299,52 @@ test('a Snowflake launcher also tracks the first tab created in a new browser wi
   assert.deepEqual(await routeToTab(launcher, learning, h.api), { result: 'focused' });
   assert.equal(h.calls.filter(call => call[0] === 'create-window').length, 1);
   assert.equal(h.tabs.length, 1);
+});
+
+test('the same launch lifecycle handles a different service, including a Slack handoff, without site branches', async () => {
+  const entry = 'https://login.helpdesk.test/workspaces/acme/';
+  const rules = (value, policy) => {
+    const result = urlRules(value, policy);
+    try {
+      const url = new URL(value);
+      if (!['login.helpdesk.test', 'app.helpdesk.test'].includes(url.hostname)) return result;
+      const workspace = url.pathname.match(/^\/workspaces\/([a-z]+)(?:\/|$)/)?.[1];
+      if (workspace) {
+        result.scope = 'helpdesk-workspace:' + workspace;
+        if (url.href === entry) result.entry = result.scope;
+      }
+    } catch { }
+    return result;
+  };
+  const learning = new LiveLearning(policy, rules);
+  const h = browser([]);
+  const wrapper = slackLink(entry);
+  await routeToTab(wrapper, learning, h.api);
+  assert.equal(h.calls.find(call => call[0] === 'create')[1].url, wrapper);
+  h.tabs[0].pendingUrl = 'https://login.helpdesk.test/workspaces/acme/oauth?state=example';
+  assert.deepEqual(await routeToTab(wrapper, learning, h.api), { result: 'focused' });
+  Object.assign(h.tabs[0], { pendingUrl: undefined, url: 'https://app.helpdesk.test/workspaces/acme/tickets/42', status: 'complete' });
+  assert.deepEqual(await routeToTab(entry, learning, h.api), { result: 'focused' });
+  assert.deepEqual(await routeToTab('https://app.helpdesk.test/workspaces/acme/tickets/43', learning, h.api), { result: 'opened' });
+  h.tabs[0].url = 'https://app.helpdesk.test/workspaces/other/tickets/42';
+  learning.prune(h.tabs);
+  assert.equal(learning.records.size, 0);
+  assert.deepEqual(await routeToTab(entry, learning, h.api), { result: 'focused' });
+  assert.equal(h.calls.filter(call => call[0] === 'focus').at(-1)[1], h.tabs[1].id);
+  h.tabs.pop();
+  assert.deepEqual(await routeToTab(entry, learning, h.api), { result: 'opened' });
+});
+
+test('resource identities are supplied by URL rules while generic matching keeps separate resources apart', async () => {
+  const rules = value => {
+    const url = new URL(value);
+    const id = url.hostname === 'catalog.test' && url.pathname.match(/^\/items\/(\d+)(?:\/|$)/)?.[1];
+    return id ? { identity: 'catalog-item:' + id } : {};
+  };
+  const learning = new LiveLearning(policy, rules);
+  const h = browser([{ url: 'https://catalog.test/items/42/photos/9' }]);
+  assert.deepEqual(await routeToTab('https://catalog.test/items/42', learning, h.api), { result: 'focused' });
+  assert.deepEqual(await routeToTab('https://catalog.test/items/43', learning, h.api), { result: 'opened' });
 });
 
 test('the extension reconnects automatically after an installed helper is replaced', async context => {
