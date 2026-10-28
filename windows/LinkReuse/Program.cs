@@ -77,6 +77,7 @@ internal static class Program
         stream.Position = 0;
         if (await Wire.Read(stream) != expected) throw new Exception("Native framing failed.");
         stream.SetLength(0);
+        stream.Position = 0;
         stream.Write(new byte[] { 0xff, 0xff, 0xff, 0x7f });
         stream.Position = 0;
         try { await Wire.Read(stream); throw new Exception("Unbounded frame accepted."); }
@@ -98,8 +99,9 @@ internal static class Program
             System.IO.Pipes.PipeOptions.Asynchronous | System.IO.Pipes.PipeOptions.CurrentUserOnly);
         await client.ConnectAsync(timeout.Token);
         await accepted;
+        var reading = Wire.Read(server, timeout.Token);
         await Wire.Write(client, expected, timeout.Token);
-        if (await Wire.Read(server, timeout.Token) != expected) throw new Exception("Current-user Windows pipe failed.");
+        if (await reading != expected) throw new Exception("Current-user Windows pipe failed.");
     }
 
     [SupportedOSPlatform("windows")]
