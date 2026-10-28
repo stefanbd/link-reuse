@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('executable', type=pathlib.Path)
 parser.add_argument('--output', type=pathlib.Path, default=ROOT / 'build/windows')
-parser.add_argument('--version', default='0.1.1')
+parser.add_argument('--version', default='0.1.2')
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 archive = args.output / f'link-reuse-windows-x64-{args.version}.zip'
@@ -40,13 +40,16 @@ manifest = {
         "if ($result.ExitCode -ne 0) { throw 'Link Reuse registration failed.' }",
     ],
     'pre_uninstall': [
-        "$result = Start-Process -FilePath \"$dir\\LinkReuse.exe\" -ArgumentList '--uninstall' -Wait -PassThru",
-        "if ($result.ExitCode -ne 0) { throw 'Link Reuse could not remove its browser registration.' }",
+        "if ($cmd -eq 'uninstall') {",
+        "    $result = Start-Process -FilePath \"$dir\\LinkReuse.exe\" -ArgumentList '--uninstall' -Wait -PassThru",
+        "    if ($result.ExitCode -ne 0) { throw 'Link Reuse could not remove its browser registration.' }",
+        "}",
     ],
     'notes': [
         'Run link-reuse --setup to load the bundled browser extension.',
         'Run link-reuse --defaults to choose Link Reuse for HTTP/HTTPS, or add it to your existing router.',
-        'Reload the extension after updates. Select your real browser as default before uninstalling.',
+        'Updates restart the helper and reload the extension automatically after the one-time 0.1.2 transition.',
+        'Select your real browser as default before uninstalling.',
     ],
 }
 (args.output / 'link-reuse.json').write_text(json.dumps(manifest, indent=2) + '\n')

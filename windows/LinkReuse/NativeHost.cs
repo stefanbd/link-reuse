@@ -30,7 +30,7 @@ internal sealed class NativeHost
         try
         {
             File.WriteAllText(file, JsonSerializer.Serialize(session, WireJson.Default.Session));
-            await Send(new Message("ready"));
+            await Send(new Message("ready", ExtensionVersion: Registration.ExtensionVersion()));
             while (await Wire.Read(input) is { } message)
             {
                 if (message.Type == "result" && message.Id is not null && pending.TryRemove(message.Id, out var waiting)) waiting.TrySetResult(message);

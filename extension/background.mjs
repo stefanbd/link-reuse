@@ -20,6 +20,12 @@ const ready = Promise.all([
     queryTabs: () => chrome.tabs.query({}),
     resetLearning: () => { observer.tabs.clear(); observer.pending.clear(); },
     badge: text => { void chrome.action.setBadgeText({ text }); },
+    extensionVersion: chrome.runtime.getManifest().version,
+    reload: async version => {
+      const manifest = await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' }).then(response => response.json());
+      if (manifest.version !== version) throw new Error('Load Link Reuse from the installed scoop/apps/link-reuse/current/extension folder to receive updates.');
+      chrome.runtime.reload();
+    },
   });
   return { policy, bridge };
 });

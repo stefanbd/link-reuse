@@ -14,12 +14,18 @@ internal static class Registration
     internal static string Sessions => Path.Combine(Root, "sessions");
     internal static string Exe => Environment.ProcessPath ?? throw new InvalidOperationException("Cannot locate Link Reuse.");
     internal static string Home => Path.GetDirectoryName(Exe)!;
+    internal static string ExtensionManifest => Path.Combine(Home, "extension", "manifest.json");
+    internal static string ExtensionVersion()
+    {
+        using var manifest = JsonDocument.Parse(File.ReadAllText(ExtensionManifest));
+        return manifest.RootElement.GetProperty("version").GetString()!;
+    }
     private const string Client = @"Software\Clients\StartMenuInternet\LinkReuse";
     private const string ProgId = @"Software\Classes\LinkReuse.Url";
 
     internal static string Origin()
     {
-        using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(Home, "extension", "manifest.json")));
+        using var manifest = JsonDocument.Parse(File.ReadAllText(ExtensionManifest));
         var hash = SHA256.HashData(Convert.FromBase64String(manifest.RootElement.GetProperty("key").GetString()!));
         var id = string.Concat(Convert.ToHexString(hash)[..32].ToLowerInvariant().Select(character => (char)('a' + Convert.ToInt32(character.ToString(), 16))));
         return $"chrome-extension://{id}/";
@@ -45,7 +51,7 @@ internal static class Registration
     {
         Directory.CreateDirectory(Root);
         var browser = Browser(requested);
-        StopHosts();
+        var hostExe = StageHost(Home, Root);
         File.WriteAllText(Path.Combine(Root, "settings.json"), JsonSerializer.Serialize(new Settings(browser), WireJson.Default.Settings));
         using (var key = Registry.CurrentUser.CreateSubKey(ProgId))
         {
@@ -62,22 +68,51 @@ internal static class Registration
         foreach (var (id, value) in Browsers.Known)
         {
             var file = Path.Combine(Root, id + "-host.json");
-            using var output = File.Create(file);
+            using (var output = File.Create(file + ".tmp"))
             using (var writer = new Utf8JsonWriter(output))
             {
                 writer.WriteStartObject();
                 writer.WriteString("name", "me.dichev.link_reuse");
                 writer.WriteString("description", "Link Reuse local browser bridge");
-                writer.WriteString("path", Exe);
+                writer.WriteString("path", hostExe);
                 writer.WriteString("type", "stdio");
                 writer.WriteStartArray("allowed_origins");
                 writer.WriteStringValue(Origin());
                 writer.WriteEndArray();
                 writer.WriteEndObject();
             }
+            File.Move(file + ".tmp", file, true);
             Set(@"Software\" + value.Vendor + @"\NativeMessagingHosts\me.dichev.link_reuse", null, file);
         }
+        StopHosts();
+        foreach (var directory in Directory.EnumerateDirectories(Path.Combine(Root, "host")).Where(value => value != Path.GetDirectoryName(hostExe)))
+        {
+            try { Directory.Delete(directory, true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
         SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    internal static string StageHost(string source, string root)
+    {
+        var sourceManifest = Path.Combine(source, "extension", "manifest.json");
+        using var manifest = JsonDocument.Parse(File.ReadAllText(sourceManifest));
+        var home = Path.Combine(root, "host", manifest.RootElement.GetProperty("version").GetString()!);
+        Directory.CreateDirectory(Path.Combine(home, "extension"));
+        var executable = Path.Combine(home, "LinkReuse.exe");
+        // Immutable version directories let an old host remain mapped while its replacement is staged.
+        if (!File.Exists(executable))
+        {
+            File.Copy(Path.Combine(source, "LinkReuse.exe"), executable + ".tmp", true);
+            File.Move(executable + ".tmp", executable);
+        }
+        var targetManifest = Path.Combine(home, "extension", "manifest.json");
+        if (!File.Exists(targetManifest))
+        {
+            File.Copy(sourceManifest, targetManifest + ".tmp", true);
+            File.Move(targetManifest + ".tmp", targetManifest);
+        }
+        return executable;
     }
 
     internal static void Uninstall()
@@ -97,6 +132,8 @@ internal static class Registration
             Registry.CurrentUser.DeleteSubKeyTree(key, false);
             File.Delete(file);
         }
+        var hosts = Path.Combine(Root, "host");
+        if (Directory.Exists(hosts)) Directory.Delete(hosts, true);
         SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
     }
 
@@ -106,7 +143,13 @@ internal static class Registration
         foreach (var browser in Browsers.Known.Keys)
         foreach (var session in NativeHost.LiveSessions(browser))
         {
-            try { using var process = Process.GetProcessById(session.ProcessId); process.Kill(); File.Delete(Path.Combine(Sessions, session.Pipe + ".json")); }
+            try
+            {
+                using var process = Process.GetProcessById(session.ProcessId);
+                process.Kill();
+                process.WaitForExit(5000);
+                File.Delete(Path.Combine(Sessions, session.Pipe + ".json"));
+            }
             catch (Exception error) when (error is ArgumentException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception) { }
         }
     }

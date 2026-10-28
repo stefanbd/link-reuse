@@ -42,7 +42,7 @@ If the extension is disconnected, the opener reports the setup problem instead o
 ## Ownership and lifetime
 
 - The app receives normal HTTP/HTTPS URLs and forwards requests over current-user-only named pipes.
-- The browser launches the same executable as its native messaging host. That process blocks between requests and exits when the browser closes the connection.
+- The browser launches a copy of the same executable from `%LOCALAPPDATA%\Link Reuse\host\<extension-version>`. Keeping the long-running host outside Scoop's package directory lets Scoop update normally. New copies are staged before replacing the registration; superseded copies are removed after their hosts stop. The host blocks between requests and exits when the browser closes the connection.
 - The extension owns Windows learning and tab selection. It serializes incoming opens, queries live normal tabs, activates a match without navigating it, or creates one tab. The most recently focused connected profile is preferred; explicit profile routing is not yet supported.
 - New tabs prefer the most recently used non-minimized normal window visible to the extension. If all are minimized, the most recently used one is restored. Existing matching tabs are reused even in minimized windows. Window recency is kept in memory and starts fresh when the extension reloads; Edge's last-focused window is used when eligible. Workspace windows must be exposed by Edge's normal window and tab APIs; workspace names are not inferred.
 - Exact URLs, Google Maps place identity, observed redirects and conservative same-origin canonicals use the existing learning policy. Sensitive URLs bypass learning and direct reuse. Private windows are excluded.
@@ -53,10 +53,17 @@ If the extension is disconnected, the opener reports the setup problem instead o
 ## Updates and removal
 
 ```powershell
+scoop update
 scoop update link-reuse
 ```
 
-Reload the extension after an update. Before uninstalling, select your real browser in Windows Default Apps or restore the destination in your router:
+From Windows 0.1.2 / extension 3.1.2 onward, updates keep the HTTP/HTTPS registration, replace and restart the native host, and reload the extension automatically when its bundled version changes. Reconnection makes at most four timed attempts after a disconnect, then waits for browser activity or a popup request. There is no permanent polling or extra updater process. The ordinary link-opening path is unchanged.
+
+The extension must be loaded from Scoop's stable `current\extension` folder. Before an automatic reload it checks the version in that folder; a stale copy reports an error instead of repeatedly reloading. The ordinary Scoop `current` junction is required for this setup.
+
+**One-time transition from 0.1.0 or 0.1.1:** turn off Link Reuse in the browser, run `Stop-Process -Name LinkReuse -Force -ErrorAction SilentlyContinue`, update through Scoop, then turn it back on and check version 3.1.2. Those older releases cannot perform the new restart/reload protocol.
+
+Before uninstalling, select your real browser in Windows Default Apps or restore the destination in your router:
 
 ```powershell
 scoop uninstall link-reuse
@@ -66,7 +73,7 @@ Uninstall removes only registrations owned by this installation and stops its ex
 
 ## Build
 
-The GitHub Windows job does one native compilation, the focused JavaScript routing checks, and a native request/framing/current-user-pipe smoke check. It does not launch or install browsers.
+The GitHub Windows job does one native compilation, focused JavaScript routing/reconnection checks, and native request/framing/current-user-pipe checks. A small Windows file-lock check stages a replacement host outside the package while the preceding host file remains locked, then verifies a same-version reinstall. It does not launch or install browsers; a full Scoop update with a connected browser still needs a Windows trial.
 
 ```powershell
 dotnet publish windows/LinkReuse/LinkReuse.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -o build/windows-native

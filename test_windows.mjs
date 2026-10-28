@@ -33,6 +33,29 @@ function browser(initial, windows = [{ id: 1, focused: true }], lastFocusedId = 
   } };
 }
 
+function nativePort(ready = { type: 'ready' }) {
+  const messages = [], disconnected = [];
+  return {
+    sent: [],
+    onMessage: { addListener(fn) { messages.push(fn); } },
+    onDisconnect: { addListener(fn) { disconnected.push(fn); } },
+    emit(message) { for (const listener of messages) listener(message); },
+    disconnect() { for (const listener of disconnected) listener(); },
+    postMessage(message) {
+      this.sent.push(message);
+      if (message.type === 'hello') queueMicrotask(() => ready ? this.emit(ready) : this.disconnect());
+    },
+  };
+}
+
+function timers(context) {
+  const pending = new Map();
+  let sequence = 0;
+  context.mock.method(globalThis, 'setTimeout', (fn, delay) => { const id = ++sequence; pending.set(id, { fn, delay }); return id; });
+  context.mock.method(globalThis, 'clearTimeout', id => pending.delete(id));
+  return pending;
+}
+
 test('Windows focuses the existing deeper view without navigating or creating a tab', async () => {
   const h = browser([{ url: photo, active: true }]);
   assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api), { result: 'focused' });
@@ -174,6 +197,71 @@ test('window recency ignores delayed older focus observations and discards close
   assert.deepEqual([...bridge.windowFocusOrder], [[1, 30], [2, 20]]);
   bridge.forgetWindow(1);
   assert.deepEqual([...bridge.windowFocusOrder], [[2, 20]]);
+});
+
+test('the extension reconnects automatically after an installed helper is replaced', async context => {
+  const pending = timers(context);
+  const ports = [];
+  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
+    connectPort: () => { const port = nativePort(); ports.push(port); return port; } });
+  clearTimeout(bridge.timer);
+  await bridge.connect();
+  ports[0].disconnect();
+  assert.equal(bridge.connected, false);
+  const [[id, retry]] = pending;
+  assert.equal(retry.delay, 5000);
+  pending.delete(id);
+  retry.fn();
+  await new Promise(setImmediate);
+  assert.equal(ports.length, 2);
+  assert.equal(bridge.connected, true);
+  assert.equal(bridge.reconnectAttempts, 0);
+  assert.equal(pending.size, 0);
+});
+
+test('a missing helper has four bounded reconnect attempts without permanent polling', async context => {
+  const pending = timers(context);
+  let connections = 0;
+  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
+    connectPort: () => { connections++; return nativePort(null); } });
+  clearTimeout(bridge.timer);
+  await assert.rejects(bridge.connect());
+  for (const delay of [5000, 10000, 20000, 20000]) {
+    assert.equal(pending.size, 1);
+    const [[id, retry]] = pending;
+    assert.equal(retry.delay, delay);
+    pending.delete(id);
+    retry.fn();
+    await new Promise(setImmediate);
+  }
+  assert.equal(connections, 5);
+  assert.equal(pending.size, 0);
+  assert.match(bridge.lastError, /Could not reconnect/);
+});
+
+test('a newer installed helper requests a reload before routing another link', async () => {
+  const port = nativePort({ type: 'ready', extensionVersion: '3.1.3' });
+  const reloaded = [];
+  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {}, connectPort: () => port,
+    extensionVersion: '3.1.2', reload: async version => { reloaded.push(version); } });
+  clearTimeout(bridge.timer);
+  await assert.rejects(bridge.connect(), /Loading the updated extension/);
+  assert.deepEqual(reloaded, ['3.1.3']);
+  port.emit({ type: 'open', id: 'during-reload', url: 'https://example.test/' });
+  assert.equal(port.sent.find(message => message.id === 'during-reload').error, bridge.lastError);
+});
+
+test('a reload failure is reported without disconnecting into a reload loop', async context => {
+  const pending = timers(context);
+  const port = nativePort({ type: 'ready', extensionVersion: '3.1.3' });
+  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {}, connectPort: () => port,
+    extensionVersion: '3.1.2', reload: async () => { throw new Error('Load the installed current/extension folder.'); } });
+  clearTimeout(bridge.timer);
+  await assert.rejects(bridge.connect());
+  await new Promise(setImmediate);
+  assert.equal(bridge.lastError, 'Load the installed current/extension folder.');
+  assert.equal(pending.size, 0);
+  assert.equal(bridge.port, port);
 });
 
 test('two simultaneous external requests create one tab and then reuse it', async () => {

@@ -1,14 +1,15 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
 
 export class WindowsBridge {
-  constructor(policy, { connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome }) {
-    Object.assign(this, { policy, connectPort, queryTabs, resetLearning, badge, browserAPI });
+  constructor(policy, { connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome, extensionVersion, reload }) {
+    Object.assign(this, { policy, connectPort, queryTabs, resetLearning, badge, browserAPI, extensionVersion, reload });
     this.learning = new LiveLearning(policy);
     this.windowFocusOrder = new Map();
     this.lastError = '';
     this.serial = Promise.resolve();
     this.pending = 0;
     this.revision = 0;
+    this.reconnectAttempts = 0;
     this.changed();
   }
   observe(records) { this.learning.observe(records); this.changed(); }
@@ -27,6 +28,7 @@ export class WindowsBridge {
   connect(force = false) {
     if (this.port) return this.ready;
     if (!force && Date.now() < (this.retryAt || 0)) return Promise.reject(new Error(this.lastError));
+    clearTimeout(this.reconnectTimer);
     const port = this.connectPort();
     this.port = port;
     this.ready = new Promise((resolve, reject) => {
@@ -35,12 +37,24 @@ export class WindowsBridge {
         if (this.port !== port) return;
         if (message.type === 'ready') {
           clearTimeout(timeout);
+          if (typeof message.extensionVersion === 'string' && this.extensionVersion && message.extensionVersion !== this.extensionVersion) {
+            this.lastError = 'Loading the updated extension…';
+            void Promise.resolve().then(() => this.reload(message.extensionVersion)).catch(error => {
+              this.lastError = error.message;
+              this.badge('!');
+            });
+            reject(new Error(this.lastError));
+            return;
+          }
           this.connected = true;
+          this.reconnectAttempts = 0;
+          clearTimeout(this.reconnectTimer);
           this.lastError = '';
           this.badge('');
           resolve();
         }
         if (message.type === 'open' && typeof message.id === 'string') {
+          if (!this.connected) { port.postMessage({ type: 'result', id: message.id, error: this.lastError || 'The extension is still connecting.' }); return; }
           if (this.pending >= 16) { port.postMessage({ type: 'result', id: message.id, error: 'Too many links are pending. Please try again.' }); return; }
           this.pending++;
           this.serial = this.serial.then(async () => {
@@ -61,10 +75,19 @@ export class WindowsBridge {
         clearTimeout(timeout);
         this.port = undefined;
         this.connected = false;
-        this.retryAt = Date.now() + 5000;
-        this.lastError = 'Windows helper unavailable. Run link-reuse --install, then reload this extension.';
+        const delay = Math.min(5000 * 2 ** this.reconnectAttempts, 20000);
+        this.retryAt = Date.now() + delay;
+        this.lastError = this.reconnectAttempts < 4 ? 'Windows helper disconnected. Reconnecting automatically…' :
+          'Could not reconnect to the Windows helper. Run link-reuse --install, then open this popup again.';
         this.badge('!');
         reject(new Error(this.lastError));
+        if (this.reconnectAttempts < 4) {
+          this.reconnectAttempts++;
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = undefined;
+            void this.connect(true).catch(() => {});
+          }, delay);
+        }
       });
       port.postMessage({ type: 'hello' });
     });

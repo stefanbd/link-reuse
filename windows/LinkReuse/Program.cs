@@ -82,9 +82,42 @@ internal static class Program
         stream.Position = 0;
         try { await Wire.Read(stream); throw new Exception("Unbounded frame accepted."); }
         catch (InvalidDataException) { }
-        if (OperatingSystem.IsWindows()) await CheckWindowsPipe(expected);
+        if (OperatingSystem.IsWindows())
+        {
+            await CheckWindowsPipe(expected);
+            CheckHostUpdate();
+        }
         Console.WriteLine("Windows request validation and native framing checks passed.");
         return 0;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void CheckHostUpdate()
+    {
+        var temporary = Path.Combine(Path.GetTempPath(), "linkreuse-check-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var package = Path.Combine(temporary, "package");
+            var runtime = Path.Combine(temporary, "runtime");
+            Directory.CreateDirectory(Path.Combine(package, "extension"));
+            var manifest = Path.Combine(package, "extension", "manifest.json");
+            var executable = Path.Combine(package, "LinkReuse.exe");
+            File.WriteAllText(manifest, "{\"version\":\"3.1.2\"}");
+            File.WriteAllText(executable, "old host");
+            var oldHost = Registration.StageHost(package, runtime);
+            using (var held = File.Open(oldHost, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                File.WriteAllText(manifest, "{\"version\":\"3.1.3\"}");
+                File.WriteAllText(executable, "new host");
+                var newHost = Registration.StageHost(package, runtime);
+                if (newHost == oldHost || !newHost.StartsWith(runtime + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                    File.ReadAllText(newHost) != "new host" || File.ReadAllText(oldHost) != "old host") throw new Exception("Host update replaced the running version or stayed inside the package.");
+                using var newHeld = File.Open(newHost, FileMode.Open, FileAccess.Read, FileShare.Read);
+                if (Registration.StageHost(package, runtime) != newHost) throw new Exception("Reinstall changed the immutable host path.");
+            }
+        }
+        finally { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); }
+        Console.WriteLine("Windows host updates stage outside the package and preserve locked previous versions.");
     }
 
     [SupportedOSPlatform("windows")]
