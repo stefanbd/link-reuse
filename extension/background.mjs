@@ -2,11 +2,16 @@ import { RedirectObserver } from './observer.mjs';
 import { canonicalDestination } from './canonical.mjs';
 import { allowsLearning } from './learning.mjs';
 import { NativeBridge } from './bridge.mjs';
+import { WindowsBridge } from './windows-bridge.mjs';
 
 const observer = new RedirectObserver();
-const ready = fetch(chrome.runtime.getURL('learning-policy.json')).then(response => response.json()).then(policy => {
+const ready = Promise.all([
+  fetch(chrome.runtime.getURL('learning-policy.json')).then(response => response.json()),
+  chrome.runtime.getPlatformInfo(),
+]).then(([policy, platform]) => {
   observer.maxSources = policy.maxBatchRecords;
-  const bridge = new NativeBridge(policy, {
+  const Bridge = platform.os === 'win' ? WindowsBridge : NativeBridge;
+  const bridge = new Bridge(policy, {
     connectPort: () => {
       const port = chrome.runtime.connectNative('me.dichev.link_reuse');
       port.onDisconnect.addListener(() => { void chrome.runtime.lastError; });
@@ -41,6 +46,13 @@ chrome.webNavigation.onErrorOccurred.addListener(event => {
 chrome.tabs.onRemoved.addListener(tabId => { observer.remove(tabId); void ready.then(({ bridge }) => bridge.changed()); });
 chrome.tabs.onUpdated.addListener((_tabId, change) => {
   if (change.url || change.status === 'complete') void ready.then(({ bridge }) => bridge.changed());
+});
+chrome.windows.onFocusChanged.addListener(windowId => {
+  if (windowId < 0) return;
+  void ready.then(async ({ bridge }) => {
+    const window = await chrome.windows.get(windowId);
+    if (!window.incognito && window.type === 'normal') bridge.focused?.();
+  }).catch(() => {});
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type === 'canonical' && sender.tab && sender.frameId === 0) {

@@ -1,0 +1,31 @@
+name: Windows package
+on:
+  workflow_dispatch:
+  push:
+    paths: ['windows/**', 'extension/**', 'test_windows.mjs', '.github/workflows/windows.yml']
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Check matching and build the native Windows executable
+        shell: pwsh
+        run: |
+          node --test test_windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet publish windows/LinkReuse/LinkReuse.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -o build/windows-native
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = Start-Process -FilePath "$PWD/build/windows-native/LinkReuse.exe" -ArgumentList '--self-test' -Wait -PassThru
+          if ($result.ExitCode -ne 0) { exit $result.ExitCode }
+      - name: Package for installation
+        shell: pwsh
+        run: python windows/package.py build/windows-native/LinkReuse.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: link-reuse-windows
+          path: build/windows/*

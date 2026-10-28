@@ -7,6 +7,8 @@ __pycache__/
 *.py[cod]
 .env
 .env.*
+windows/**/bin/
+windows/**/obj/
 *.sqlite
 *.sqlite-*
 *.log

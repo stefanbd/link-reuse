@@ -1,6 +1,8 @@
-# Link Reuse for OpenIn
+# Link Reuse
 
-Private source repository: [stefanbd/link-reuse](https://github.com/stefanbd/link-reuse).
+Source repository: [stefanbd/link-reuse](https://github.com/stefanbd/link-reuse).
+
+The [Windows preview](windows/README.md) adds a standalone Windows app and Scoop packaging for Edge, Chrome and Brave. It accepts normal web URLs directly or from any router. Windows learning and tab selection live in the shared extension; the Mac implementation below continues to use its native browser adapters.
 
 OpenIn chooses the browser and passes that choice to one native Link Reuse app. The app checks existing normal tabs before opening a link, selects a match without changing its current URL, or opens the original link normally. Arc includes tabs in its spaces. The active matching tab wins; otherwise exact URLs precede equivalent resource URLs.
 

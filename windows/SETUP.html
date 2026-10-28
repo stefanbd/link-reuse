@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set up Link Reuse</title>
+<style>
+  :root { color-scheme: light dark; font: 16px/1.6 system-ui; }
+  body { max-width: 680px; margin: 48px auto; padding: 0 24px; }
+  h1 { line-height: 1.2; } li { margin: 20px 0; } code, input { font-family: ui-monospace, monospace; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; } button { padding: 8px 12px; } small { display: block; }
+</style>
+<h1>Open links in the tab you already have</h1>
+<p>Link Reuse checks your chosen browser before opening an external link. Matching tabs keep their current page and view.</p>
+<ol>
+  <li><strong>Load the browser extension.</strong> In Edge, enter <code>edge://extensions</code> in the address bar. Turn on Developer mode, choose <b>Load unpacked</b>, and select this folder:
+    <input id="folder" readonly aria-label="Extension folder">
+    <button id="copy">Copy folder path</button>
+    <small>For Chrome or Brave, use <code>chrome://extensions</code> or <code>brave://extensions</code>. On a managed PC, your organization must allow the extension and local browser helper.</small>
+  </li>
+  <li><strong>Check the connection.</strong> Open the Link Reuse extension popup. It should say it is connected. Website access supports redirect and page-identity learning. Private windows are excluded.</li>
+  <li><strong>Choose how external links reach Link Reuse.</strong>
+    <p>To use it directly, run <code>link-reuse --defaults</code> in PowerShell and choose Link Reuse for HTTP and HTTPS. This replaces your default browser setting; pages still open in your chosen browser.</p>
+    <p>If you already use a browser router, keep that as your default and add <code>LinkReuse.exe</code> as a custom destination. Pass the URL as one argument, optionally preceded by <code>--browser edge</code>, <code>--browser chrome</code> or <code>--browser brave</code>.</p>
+  </li>
+</ol>
+<p>To choose Edge: <code>link-reuse --install --browser edge</code>. Check the bridge: <code>link-reuse --status</code>.</p>
+<p>Learning stays in extension memory while matching tabs are open, with a 2 MiB / 4,096-link limit. It is lost when the browser or extension restarts. Previously unseen redirects need a first normal visit.</p>
+<p>Before uninstalling, select your real browser as the default. After updating, reload the extension. No administrator privileges, Start menu shortcut or login startup entry is required.</p>
+<script>
+const folder = document.getElementById('folder');
+folder.value = decodeURIComponent(new URL('./extension/', location.href).pathname).replace(/^\//, '').replaceAll('/', '\\').replace(/\\$/, '');
+document.getElementById('copy').addEventListener('click', async () => {
+  folder.select();
+  try { await navigator.clipboard.writeText(folder.value); } catch { document.execCommand('copy'); }
+});
+</script>
+</html>
