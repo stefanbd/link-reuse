@@ -1,11 +1,11 @@
 {
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Reuse an existing browser tab before opening an external web link.",
   "homepage": "https://github.com/stefanbd/link-reuse",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/stefanbd/link-reuse/releases/download/windows-v0.1.1/link-reuse-windows-x64-0.1.1.zip",
-      "hash": "0593d03127270d7b640b3aa3ed295fa7e40942d021470a7565a350bbd5b4f4a5"
+      "url": "https://github.com/stefanbd/link-reuse/releases/download/windows-v0.1.2/link-reuse-windows-x64-0.1.2.zip",
+      "hash": "f50d6f7b5e1e376aff11f898d35dbbefa5d29f6892c091a9ba4e3bc6dce25dd4"
     }
   },
   "bin": [
@@ -20,12 +20,15 @@
     "if ($result.ExitCode -ne 0) { throw 'Link Reuse registration failed.' }"
   ],
   "pre_uninstall": [
-    "$result = Start-Process -FilePath \"$dir\\LinkReuse.exe\" -ArgumentList '--uninstall' -Wait -PassThru",
-    "if ($result.ExitCode -ne 0) { throw 'Link Reuse could not remove its browser registration.' }"
+    "if ($cmd -eq 'uninstall') {",
+    "    $result = Start-Process -FilePath \"$dir\\LinkReuse.exe\" -ArgumentList '--uninstall' -Wait -PassThru",
+    "    if ($result.ExitCode -ne 0) { throw 'Link Reuse could not remove its browser registration.' }",
+    "}"
   ],
   "notes": [
     "Run link-reuse --setup to load the bundled browser extension.",
     "Run link-reuse --defaults to choose Link Reuse for HTTP/HTTPS, or add it to your existing router.",
-    "Reload the extension after updates. Select your real browser as default before uninstalling."
+    "Updates restart the helper and reload the extension automatically after the one-time 0.1.2 transition.",
+    "Select your real browser as default before uninstalling."
   ]
 }
