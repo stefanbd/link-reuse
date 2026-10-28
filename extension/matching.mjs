@@ -39,6 +39,24 @@ export function equivalent(left, right, records) {
   return [...resourceKeys(right, records)].some(key => keys.has(key));
 }
 
+function slackLinkTarget(value, policy) {
+  try {
+    if (typeof value !== 'string' || value.length > policy.maxURLBytes) return null;
+    const url = new URL(value);
+    if (url.origin !== 'https://slack.com' || url.username || url.password ||
+        url.pathname !== '/openid/connect/login_initiate_redirect') return null;
+    const hints = url.searchParams.getAll('login_hint');
+    if (hints.length !== 1 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(hints[0])) return null;
+    const decode = part => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+      Uint8Array.from(atob(part.replace(/-/g, '+').replace(/_/g, '/')), character => character.charCodeAt(0))));
+    const [header, payload] = hints[0].split('.').slice(0, 2).map(decode);
+    // This unverified claim is only a lookup hint, never authentication or a replacement navigation URL.
+    const target = payload['https://slack.com/target_uri'];
+    return header.alg === 'RS256' && header.typ === 'JWT' && payload.iss === 'https://slack.com' &&
+      allowsLearning(target, policy) ? urlKey(target) : null;
+  } catch { return null; }
+}
+
 export class LiveLearning {
   constructor(policy) { this.policy = policy; this.records = new Map(); this.settledURLs = new Map(); this.bytes = 0; }
   observe(records) {
@@ -75,29 +93,36 @@ export class LiveLearning {
   clear() { this.records.clear(); this.settledURLs.clear(); this.bytes = 0; }
 }
 
-export async function routeToTab(url, learning, browser) {
+export async function routeToTab(url, learning, browser, windowFocusOrder = new Map()) {
   const windows = (await browser.windows.getAll({ windowTypes: ['normal'] })).filter(value => !value.incognito);
   const lastFocused = browser.windows.getLastFocused ? await browser.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null) : null;
-  const window = windows.find(value => value.focused) || windows.find(value => value.id === lastFocused?.id) || windows[0];
+  const visible = windows.filter(value => value.state !== 'minimized');
+  const candidates = visible.length ? visible : windows;
+  const window = candidates.find(value => value.focused) || candidates.find(value => value.id === lastFocused?.id) ||
+    [...candidates].sort((left, right) => (windowFocusOrder.get(right.id) ?? 0) - (windowFocusOrder.get(left.id) ?? 0))[0];
+  const activateWindow = id => browser.windows.update(id, {
+    ...(windows.find(value => value.id === id)?.state === 'minimized' ? { state: 'normal' } : {}), focused: true,
+  });
   const tabs = await browser.tabs.query({ windowType: 'normal' });
   learning.prune(tabs);
+  const lookupURL = slackLinkTarget(url, learning.policy) || url;
   const available = tabs.filter(tab => !tab.incognito && allowsLearning(tab.pendingUrl || tab.url, learning.policy));
   const preferred = available.find(tab => tab.active && tab.windowId === window?.id);
-  const match = allowsLearning(url, learning.policy) && (
-    (preferred && equivalent(url, preferred.pendingUrl || preferred.url, learning.records) && preferred) ||
-    available.find(tab => urlKey(tab.pendingUrl || tab.url) === urlKey(url)) ||
-    available.find(tab => equivalent(url, tab.pendingUrl || tab.url, learning.records))
+  const match = allowsLearning(lookupURL, learning.policy) && (
+    (preferred && equivalent(lookupURL, preferred.pendingUrl || preferred.url, learning.records) && preferred) ||
+    available.find(tab => urlKey(tab.pendingUrl || tab.url) === urlKey(lookupURL)) ||
+    available.find(tab => equivalent(lookupURL, tab.pendingUrl || tab.url, learning.records))
   );
   if (match) {
     const current = await browser.tabs.get(match.id);
-    if (current.incognito || !equivalent(url, current.pendingUrl || current.url, learning.records)) throw new Error('The matching tab changed. Please open the link again.');
+    if (current.incognito || !equivalent(lookupURL, current.pendingUrl || current.url, learning.records)) throw new Error('The matching tab changed. Please open the link again.');
     await browser.tabs.update(match.id, { active: true });
-    await browser.windows.update(match.windowId, { ...(windows.find(value => value.id === match.windowId)?.state === 'minimized' ? { state: 'normal' } : {}), focused: true });
+    await activateWindow(match.windowId);
     return { result: 'focused' };
   }
   if (window) {
     await browser.tabs.create({ windowId: window.id, url, active: true });
-    await browser.windows.update(window.id, { focused: true });
+    await activateWindow(window.id);
   } else await browser.windows.create({ url, incognito: false, type: 'normal', focused: true });
   return { result: 'opened' };
 }

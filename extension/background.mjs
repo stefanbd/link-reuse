@@ -49,11 +49,13 @@ chrome.tabs.onUpdated.addListener((_tabId, change) => {
 });
 chrome.windows.onFocusChanged.addListener(windowId => {
   if (windowId < 0) return;
+  const focusedAt = performance.now();
   void ready.then(async ({ bridge }) => {
     const window = await chrome.windows.get(windowId);
-    if (!window.incognito && window.type === 'normal') bridge.focused?.();
+    if (!window.incognito && window.type === 'normal') bridge.focused?.(windowId, focusedAt);
   }).catch(() => {});
 });
+chrome.windows.onRemoved.addListener(windowId => { void ready.then(({ bridge }) => bridge.forgetWindow?.(windowId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type === 'canonical' && sender.tab && sender.frameId === 0) {
     const tab = observer.tabs.get(sender.tab.id);

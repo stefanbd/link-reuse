@@ -9,6 +9,8 @@
   {"url":"https://accounts.example.test/anything", "allowed":false},
   {"url":"https://example.test/a?Access_Token=abc", "allowed":false},
   {"url":"https://example.test/a?api%5Fkey=abc", "allowed":false},
+  {"url":"https://example.test/a?login_hint=example", "allowed":false},
+  {"url":"https://slack.com/openid/connect/login_initiate_redirect", "allowed":false},
   {"url":"https://example.test/a?X-Amz-Signature=abc", "allowed":false},
   {"url":"https://example.test/a?X-Goog-Credential=abc", "allowed":false},
   {"url":"https://example.test/a#access_token=abc", "allowed":false},
