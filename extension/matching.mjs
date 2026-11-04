@@ -10,7 +10,7 @@ function urlKey(value) {
 
 export class LiveLearning {
   constructor(policy, rules = urlRules) {
-    this.policy = policy; this.rules = rules; this.records = new Map(); this.settledURLs = new Map(); this.bytes = 0;
+    this.policy = policy; this.rules = rules; this.records = new Map(); this.settledURLs = new Map(); this.bytes = 0; this.revision = 0;
   }
   resolve(value) {
     const original = urlKey(value);
@@ -53,6 +53,18 @@ export class LiveLearning {
   rememberLaunch(tabId, request) {
     if (request.entry && Number.isInteger(tabId)) this.put('launch\n' + tabId, { tabId, entry: request.entry });
   }
+  snapshot() {
+    return [...this.records].map(([key, { bytes, ...record }]) => ({ kind: key.split('\n')[0], ...record }));
+  }
+  restore(records) {
+    if (!Array.isArray(records)) return;
+    for (const record of records.slice(-this.policy.maxRecords)) {
+      if (!record || typeof record !== 'object') continue;
+      if (record.kind === 'launch') {
+        if (typeof record.entry === 'string' && record.entry.length <= this.policy.maxURLBytes) this.rememberLaunch(record.tabId, record);
+      } else this.observe([record]);
+    }
+  }
   observe(records) {
     for (const record of records) {
       if (!['redirect', 'canonical'].includes(record.kind) || !allowsLearning(record.source, this.policy)) continue;
@@ -66,6 +78,7 @@ export class LiveLearning {
     value.bytes = new TextEncoder().encode(JSON.stringify(value)).length + 32;
     this.records.set(key, value);
     this.bytes += value.bytes;
+    this.revision++;
     while (this.records.size > this.policy.maxRecords || this.bytes > this.policy.maxCacheBytes) this.remove(this.records.keys().next().value);
   }
   prune(tabs) {
@@ -79,7 +92,7 @@ export class LiveLearning {
         if (allowsLearning(url, this.policy)) this.settledURLs.set(tab.id, url);
         else this.settledURLs.delete(tab.id);
       }
-      const candidates = tab.status === 'loading' && previous ? [url, previous] : [url];
+      const candidates = tab.status === 'loading' ? [url, tab.url, previous] : [url];
       for (const candidate of candidates) if (allowsLearning(candidate, this.policy)) {
         for (const key of this.keys(candidate)) live.add(key);
       }
@@ -93,8 +106,8 @@ export class LiveLearning {
       if (![...this.keys(record.destination)].some(value => live.has(value))) this.remove(key);
     }
   }
-  remove(key) { const value = this.records.get(key); if (value) { this.bytes -= value.bytes; this.records.delete(key); } }
-  clear() { this.records.clear(); this.settledURLs.clear(); this.bytes = 0; }
+  remove(key) { const value = this.records.get(key); if (value) { this.bytes -= value.bytes; this.records.delete(key); this.revision++; } }
+  clear() { if (this.records.size) this.revision++; this.records.clear(); this.settledURLs.clear(); this.bytes = 0; }
 }
 
 export async function routeToTab(url, learning, browser, windowFocusOrder = new Map()) {

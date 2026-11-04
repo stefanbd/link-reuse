@@ -58,6 +58,231 @@ function timers(context) {
   return pending;
 }
 
+function learningSession() {
+  let state;
+  return {
+    read: () => structuredClone(state),
+    async save(records) { state = structuredClone(records); },
+  };
+}
+
+function sessionBridge(h, session, extra = {}) {
+  const port = nativePort();
+  const bridge = new WindowsBridge(policy, { connectPort: () => port, queryTabs: h.api.tabs.query,
+    browserAPI: h.api, badge() {}, resetLearning() {}, learningState: session.read(),
+    saveLearning: records => session.save(records), ...extra });
+  return { bridge, port };
+}
+
+async function settleBridge(bridge, pending) {
+  const timer = pending.get(bridge.timer);
+  if (timer) {
+    pending.delete(bridge.timer);
+    timer.fn();
+  }
+  await new Promise(setImmediate);
+  await bridge.saving;
+}
+
+test('sleeping and unloaded tabs are selected without content scripts, reloads or replacement tabs', async () => {
+  for (const state of [{ frozen: true }, { discarded: true, status: 'unloaded' },
+    { discarded: true, status: 'unloaded', url: '', pendingUrl: photo }]) {
+    const h = browser([{ url: photo, active: false, ...state }]);
+    assert.deepEqual(await routeToTab(photo, new LiveLearning(policy), h.api), { result: 'focused' });
+    assert.deepEqual(h.calls, [['focus', 1, { active: true }], ['window', 1, { focused: true }]]);
+    assert.equal(h.tabs.length, 1);
+  }
+});
+
+test('a restarted worker restores learned links and reuses sleeping redirect and canonical destinations', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/item', frozen: true },
+    { url: 'https://shop.test/products/42/reviews', discarded: true, status: 'unloaded' }]);
+  const session = learningSession();
+  const first = sessionBridge(h, session).bridge;
+  first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url },
+    { kind: 'canonical', source: h.tabs[1].url, destination: 'https://shop.test/products/42' }]);
+  await settleBridge(first, pending);
+  assert.equal(session.read()?.length, 2);
+  const second = sessionBridge(h, session);
+  await second.bridge.connect();
+  clearTimeout(second.bridge.timer);
+  second.port.emit({ type: 'open', id: 'redirect', url: 'https://example.test/short' });
+  second.port.emit({ type: 'open', id: 'canonical', url: 'https://shop.test/products/42' });
+  await second.bridge.serial;
+  assert.deepEqual(second.port.sent.filter(message => message.type === 'result').map(message => message.result), ['focused', 'focused']);
+  assert.equal(h.tabs.length, 2);
+  assert.equal(h.calls.some(call => call[0].startsWith('create')), false);
+});
+
+test('restored learning is pruned against current tabs before it can match', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/live' }]);
+  const session = learningSession();
+  const first = sessionBridge(h, session).bridge;
+  first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
+  await settleBridge(first, pending);
+  for (const tabs of [[], [{ id: 1, url: 'https://example.test/elsewhere', status: 'complete' }],
+    [{ id: 1, url: 'https://example.test/live', discarded: true, status: 'unloaded', incognito: true }]]) {
+    const current = browser(tabs);
+    const restarted = sessionBridge(current, session).bridge;
+    assert.deepEqual(await routeToTab('https://example.test/short', restarted.learning, current.api), { result: 'opened' });
+    assert.equal(restarted.learning.records.size, 0);
+    clearTimeout(restarted.timer);
+  }
+});
+
+test('owned sign-in tabs survive worker restarts without saving their authentication URLs', async context => {
+  const pending = timers(context);
+  const entry = 'https://example-production.snowflakecomputing.com/console/login#/';
+  const h = browser([]);
+  const session = learningSession();
+  const first = sessionBridge(h, session).bridge;
+  await routeToTab(entry, first.learning, h.api);
+  Object.assign(h.tabs[0], { pendingUrl: undefined,
+    url: 'https://example-production.snowflakecomputing.com/oauth/authorize?state=private&code_challenge=private',
+    discarded: true, status: 'unloaded' });
+  await settleBridge(first, pending);
+  assert.deepEqual(session.read(), [{ kind: 'launch', tabId: 1, entry: 'snowflake-account:example/production' }]);
+  const second = sessionBridge(h, session).bridge;
+  assert.deepEqual(await routeToTab(entry, second.learning, h.api), { result: 'focused' });
+  assert.equal(h.tabs.length, 1);
+  clearTimeout(second.timer);
+});
+
+test('forgetting learned links waits for queued session writes and cannot restore a cleared alias', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/live' }]);
+  const session = learningSession();
+  let release;
+  const first = sessionBridge(h, session, { saveLearning: async records => {
+    await new Promise(resolve => { release = resolve; });
+    await session.save(records);
+  } }).bridge;
+  first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
+  const saving = settleBridge(first, pending);
+  await new Promise(setImmediate);
+  assert.equal(typeof release, 'function');
+  first.saveLearning = records => session.save(records);
+  const clearing = first.clear();
+  release();
+  await saving;
+  await clearing;
+  assert.deepEqual(session.read(), []);
+  const second = sessionBridge(h, session).bridge;
+  assert.deepEqual(await routeToTab('https://example.test/short', second.learning, h.api), { result: 'opened' });
+  clearTimeout(second.timer);
+});
+
+test('restoring a session reapplies privacy and storage limits', () => {
+  const learning = new LiveLearning({ ...policy, maxRecords: 2, maxCacheBytes: 500 });
+  learning.restore([
+    { kind: 'redirect', source: 'https://example.test/first', destination: 'https://example.test/live' },
+    { kind: 'redirect', source: 'https://example.test/callback?code=private', destination: 'https://example.test/live' },
+  ]);
+  assert.equal(learning.records.size, 1);
+  assert.equal(JSON.stringify(learning.snapshot()).includes('private'), false);
+  learning.restore(Array.from({ length: 100 }, (_, i) => ({ kind: 'canonical',
+    source: `https://example.test/${i}/reviews`, destination: `https://example.test/${i}` })));
+  assert.ok(learning.records.size <= 2 && learning.bytes <= 500);
+});
+
+test('restoring during a pending navigation retains the committed page only until navigation settles', () => {
+  const learning = new LiveLearning(policy);
+  learning.restore([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/item' }]);
+  learning.prune([{ id: 1, url: 'https://example.test/item', pendingUrl: 'https://example.test/other', status: 'loading' }]);
+  assert.equal(learning.records.size, 1);
+  learning.prune([{ id: 1, url: 'https://example.test/other', status: 'complete' }]);
+  assert.equal(learning.records.size, 0);
+});
+
+test('session write failures are reported and retried on the next change', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/live' }]);
+  const session = learningSession();
+  const { bridge } = sessionBridge(h, session, { saveLearning: async () => { throw new Error('Storage unavailable.'); } });
+  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
+  await assert.rejects(settleBridge(bridge, pending), /Storage unavailable/);
+  const status = await bridge.status();
+  assert.match(status.lastError, /Could not keep learned links/);
+  bridge.saveLearning = records => session.save(records);
+  bridge.changed();
+  await settleBridge(bridge, pending);
+  assert.equal((await bridge.status()).lastError, '');
+  assert.equal(session.read().length, 1);
+});
+
+test('unchanged tab activity does not rewrite session learning', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/live' }]);
+  const session = learningSession();
+  let writes = 0;
+  const { bridge } = sessionBridge(h, session, { saveLearning: async records => { writes++; await session.save(records); } });
+  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
+  await settleBridge(bridge, pending);
+  for (const state of [{ frozen: true }, { frozen: false, discarded: true, status: 'unloaded' }]) {
+    Object.assign(h.tabs[0], state);
+    bridge.changed();
+    await settleBridge(bridge, pending);
+  }
+  assert.equal(writes, 1);
+  h.tabs.length = 0;
+  bridge.changed();
+  await settleBridge(bridge, pending);
+  assert.equal(writes, 2);
+  assert.deepEqual(session.read(), []);
+});
+
+test('the cold background waits for session restore before handling an external open', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/live', status: 'unloaded', discarded: true }]);
+  const port = nativePort();
+  const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); },
+    emit(...args) { for (const fn of this.listeners) fn(...args); } });
+  let release;
+  let saved;
+  const previousChrome = globalThis.chrome;
+  globalThis.chrome = {
+    runtime: { async getPlatformInfo() { return { os: 'win' }; }, getURL: value => 'https://extension.test/' + value,
+      getManifest: () => ({ version: '3.1.3' }), connectNative: () => port, onStartup: event(), onMessage: event() },
+    storage: { session: { get: () => new Promise(resolve => { release = resolve; }),
+      async set(value) { saved = structuredClone(value); } } },
+    tabs: { ...h.api.tabs, onUpdated: event(), onRemoved: event(), onActivated: event(),
+      sendMessage() { throw new Error('Sleeping tab content must not be contacted to match it.'); } },
+    windows: { ...h.api.windows, onFocusChanged: event(), onRemoved: event() },
+    webNavigation: Object.fromEntries(['onBeforeNavigate', 'onCommitted', 'onHistoryStateUpdated',
+      'onReferenceFragmentUpdated', 'onErrorOccurred'].map(name => [name, event()])),
+    action: { async setBadgeText() {} },
+  };
+  context.mock.method(globalThis, 'fetch', async () => ({ async json() { return policy; } }));
+  try {
+    await import('./extension/background.mjs?session-restore');
+    await new Promise(setImmediate);
+    chrome.tabs.onUpdated.emit(1, { discarded: true, status: 'unloaded' });
+    chrome.runtime.onStartup.emit();
+    assert.equal(pending.size, 0);
+    release({ learning: [{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }] });
+    await new Promise(setImmediate);
+    for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
+    await new Promise(setImmediate);
+    port.emit({ type: 'open', id: 'first-after-idle', url: 'https://example.test/short' });
+    await new Promise(setImmediate);
+    assert.deepEqual(port.sent.find(message => message.id === 'first-after-idle'),
+      { type: 'result', id: 'first-after-idle', result: 'focused' });
+    assert.equal(h.tabs.length, 1);
+    assert.equal(saved.learning.length, 1);
+    h.tabs.length = 0;
+    chrome.tabs.onRemoved.emit(1);
+    await new Promise(setImmediate);
+    for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
+    await new Promise(setImmediate);
+    assert.deepEqual(saved.learning, []);
+  } finally {
+    if (previousChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = previousChrome;
+  }
+});
+
 test('Windows focuses the existing deeper view without navigating or creating a tab', async () => {
   const h = browser([{ url: photo, active: true }]);
   assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api), { result: 'focused' });

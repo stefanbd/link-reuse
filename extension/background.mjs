@@ -8,8 +8,9 @@ const observer = new RedirectObserver();
 const ready = Promise.all([
   fetch(chrome.runtime.getURL('learning-policy.json')).then(response => response.json()),
   chrome.runtime.getPlatformInfo(),
-]).then(([policy, platform]) => {
+]).then(async ([policy, platform]) => {
   observer.maxSources = policy.maxBatchRecords;
+  const saved = platform.os === 'win' ? await chrome.storage.session.get('learning') : {};
   const Bridge = platform.os === 'win' ? WindowsBridge : NativeBridge;
   const bridge = new Bridge(policy, {
     connectPort: () => {
@@ -18,6 +19,8 @@ const ready = Promise.all([
       return port;
     },
     queryTabs: () => chrome.tabs.query({}),
+    learningState: saved.learning,
+    saveLearning: learning => chrome.storage.session.set({ learning }),
     resetLearning: () => { observer.tabs.clear(); observer.pending.clear(); },
     badge: text => { void chrome.action.setBadgeText({ text }); },
     extensionVersion: chrome.runtime.getManifest().version,
@@ -51,8 +54,10 @@ chrome.webNavigation.onErrorOccurred.addListener(event => {
 });
 chrome.tabs.onRemoved.addListener(tabId => { observer.remove(tabId); void ready.then(({ bridge }) => bridge.changed()); });
 chrome.tabs.onUpdated.addListener((_tabId, change) => {
-  if (change.url || change.status === 'complete') void ready.then(({ bridge }) => bridge.changed());
+  if (change.url || change.status || 'discarded' in change || 'frozen' in change) void ready.then(({ bridge }) => bridge.changed());
 });
+chrome.tabs.onActivated.addListener(() => { void ready.then(({ bridge }) => bridge.changed()); });
+chrome.runtime.onStartup.addListener(() => { void ready.then(({ bridge }) => bridge.changed()); });
 chrome.windows.onFocusChanged.addListener(windowId => {
   if (windowId < 0) return;
   const focusedAt = performance.now();

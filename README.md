@@ -70,7 +70,7 @@ python3 install.py
 
 In each browser, open `chrome://extensions`, enable Developer mode, select **Load unpacked**, and choose `~/Applications/Link Reuse Extension`. In the file picker, Command–Shift–G opens Go to Folder; enter `~/Applications`, then select **Link Reuse Extension**. Version 3 has stable ID `dkkfdmgdgomngkkoaaolokhechagdlfl`. Upgrading from version 2 requires removing the old extension once, then loading this one. Subsequent updates keep the ID and only need Reload.
 
-The extension uses `tabs`, `webNavigation` and `nativeMessaging`; it does not use saved browser history. Arc has the extension installed. Chrome, Brave and Edge Beta need their own extension load for redirect/canonical learning; their ordinary URL and Maps identity matching work independently.
+The extension uses `tabs`, `webNavigation`, `nativeMessaging` and `storage`; it does not use saved browser history. Windows uses `storage.session` for an in-memory learning copy that survives service-worker stops and is cleared when the browser restarts or the extension is disabled, reloaded or updated. The Mac recorder's storage remains native. Arc has the extension installed. Chrome, Brave and Edge Beta need their own extension load for redirect/canonical learning; their ordinary URL and Maps identity matching work independently.
 
 OpenIn remains the default HTTP/HTTPS handler. Each eligible browser destination retains its name and rule membership, points to the same Link Reuse app, and uses `openin-rewrite.js` with its browser ID substituted. Normal links therefore carry the chosen browser explicitly without adding a shell launch to the click path.
 

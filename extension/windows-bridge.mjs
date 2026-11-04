@@ -1,9 +1,12 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
 
 export class WindowsBridge {
-  constructor(policy, { connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome, extensionVersion, reload }) {
-    Object.assign(this, { policy, connectPort, queryTabs, resetLearning, badge, browserAPI, extensionVersion, reload });
+  constructor(policy, { connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome, extensionVersion, reload,
+    learningState, saveLearning = async () => {} }) {
+    Object.assign(this, { policy, connectPort, queryTabs, resetLearning, badge, browserAPI, extensionVersion, reload, saveLearning });
     this.learning = new LiveLearning(policy);
+    this.learning.restore(learningState);
+    this.saving = Promise.resolve();
     this.windowFocusOrder = new Map();
     this.lastError = '';
     this.serial = Promise.resolve();
@@ -19,8 +22,10 @@ export class WindowsBridge {
     this.timer = setTimeout(() => {
       this.timer = undefined;
       const revision = this.revision;
-      void this.queryTabs().then(tabs => {
-        if (revision === this.revision) this.learning.prune(tabs);
+      void this.queryTabs().then(async tabs => {
+        if (revision !== this.revision) return;
+        this.learning.prune(tabs);
+        await this.persist();
       }).catch(() => {});
       void this.connect().catch(() => {});
     }, 50);
@@ -63,6 +68,7 @@ export class WindowsBridge {
               const parsed = new URL(message.url);
               if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(message.url).length > 65536) throw new Error('Invalid web link.');
               const result = await routeToTab(message.url, this.learning, this.browserAPI, this.windowFocusOrder);
+              this.changed();
               port.postMessage({ type: 'result', id: message.id, ...result });
             } catch (error) {
               if (this.port === port) port.postMessage({ type: 'result', id: message.id, error: error.message });
@@ -93,7 +99,27 @@ export class WindowsBridge {
     });
     return this.ready;
   }
-  async clear() { this.learning.clear(); this.resetLearning(); return this.status(); }
+  persist() {
+    this.saving = this.saving.catch(() => {}).then(async () => {
+      const revision = this.learning.revision;
+      if (revision === this.savedRevision) return;
+      await this.saveLearning(this.learning.snapshot());
+      this.savedRevision = revision;
+    }).then(() => {
+      this.storageError = '';
+    }, error => {
+      this.storageError = 'Could not keep learned links for this browser session: ' + error.message;
+      throw error;
+    });
+    return this.saving;
+  }
+  async clear() {
+    this.revision++;
+    this.learning.clear();
+    this.resetLearning();
+    await this.persist();
+    return this.status();
+  }
   focused(windowId, focusedAt) {
     if (focusedAt > (this.windowFocusOrder.get(windowId) ?? -Infinity)) this.windowFocusOrder.set(windowId, focusedAt);
     if (this.connected) this.port.postMessage({ type: 'activity' });
@@ -103,7 +129,8 @@ export class WindowsBridge {
     try { await this.connect(true); } catch (error) { this.lastError = error.message; }
     const tabs = await this.queryTabs();
     this.learning.prune(tabs);
-    return { connected: !!this.connected, lastError: this.lastError, pending: this.pending, maxBytes: this.policy.maxCacheBytes,
+    await this.persist().catch(() => {});
+    return { connected: !!this.connected, lastError: this.lastError || this.storageError, pending: this.pending, maxBytes: this.policy.maxCacheBytes,
       stats: { records: this.learning.records.size, bytes: this.learning.bytes } };
   }
 }
