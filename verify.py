@@ -6,7 +6,7 @@ import subprocess
 root = pathlib.Path(__file__).resolve().parent
 output = root / 'build/tests'
 output.mkdir(parents=True, exist_ok=True)
-subprocess.run(['node', '--test', 'test_redirects.mjs', 'test_canonical.mjs', 'test_learning.mjs', 'test_bridge.mjs'], cwd=root, check=True)
+subprocess.run(['node', '--test', 'test_redirects.mjs', 'test_canonical.mjs', 'test_learning.mjs', 'test_bridge.mjs', 'test_page_links.mjs'], cwd=root, check=True)
 common = ['BrowserConfiguration.swift', 'OpenRequest.swift', 'URLMatching.swift', 'LearningPolicy.swift']
 for test, sources in [('test_url_matching.swift', ['URLMatching.swift']),
                       ('test_open_request.swift', common),

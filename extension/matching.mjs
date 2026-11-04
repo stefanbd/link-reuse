@@ -110,12 +110,15 @@ export class LiveLearning {
   clear() { if (this.records.size) this.revision++; this.records.clear(); this.settledURLs.clear(); this.bytes = 0; }
 }
 
-export async function routeToTab(url, learning, browser, windowFocusOrder = new Map()) {
+export async function routeToTab(url, learning, browser, windowFocusOrder = new Map(), opening = {}) {
   const windows = (await browser.windows.getAll({ windowTypes: ['normal'] })).filter(value => !value.incognito);
+  const source = Number.isInteger(opening.sourceTabId) ? await browser.tabs.get(opening.sourceTabId) : null;
+  if (source?.incognito) throw new Error('Private tab links are not supported.');
   const lastFocused = browser.windows.getLastFocused ? await browser.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null) : null;
   const visible = windows.filter(value => value.state !== 'minimized');
   const candidates = visible.length ? visible : windows;
-  const window = candidates.find(value => value.focused) || candidates.find(value => value.id === lastFocused?.id) ||
+  const window = (source && windows.find(value => value.id === source.windowId)) ||
+    candidates.find(value => value.focused) || candidates.find(value => value.id === lastFocused?.id) ||
     [...candidates].sort((left, right) => (windowFocusOrder.get(right.id) ?? 0) - (windowFocusOrder.get(left.id) ?? 0))[0];
   const activateWindow = id => browser.windows.update(id, {
     ...(windows.find(value => value.id === id)?.state === 'minimized' ? { state: 'normal' } : {}), focused: true,
@@ -134,9 +137,11 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
     await activateWindow(match.windowId);
     return { result: 'focused' };
   }
-  const created = window ? await browser.tabs.create({ windowId: window.id, url, active: true }) :
+  const active = opening.active !== false;
+  const created = window ? await browser.tabs.create({ windowId: window.id, url, active,
+    ...(source?.windowId === window.id ? { index: source.index + 1 } : {}) }) :
     (await browser.windows.create({ url, incognito: false, type: 'normal', focused: true })).tabs?.[0];
   learning.rememberLaunch(created?.id, request);
-  if (window) await activateWindow(window.id);
+  if (window && active) await activateWindow(window.id);
   return { result: 'opened' };
 }

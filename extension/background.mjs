@@ -68,6 +68,14 @@ chrome.windows.onFocusChanged.addListener(windowId => {
 });
 chrome.windows.onRemoved.addListener(windowId => { void ready.then(({ bridge }) => bridge.forgetWindow?.(windowId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (['page-link-capability', 'page-link'].includes(message.type) && sender.tab && !sender.tab.incognito) {
+    void ready.then(({ bridge }) => {
+      if (message.type === 'page-link-capability') return { enabled: typeof bridge.open === 'function' };
+      if (!bridge.open) throw new Error('Webpage link reuse is unavailable in this browser.');
+      return bridge.open(message.url, { sourceTabId: sender.tab.id, active: message.active !== false });
+    }).then(respond, error => respond({ error: error.message }));
+    return true;
+  }
   if (message.type === 'canonical' && sender.tab && sender.frameId === 0) {
     const tab = observer.tabs.get(sender.tab.id);
     if (tab?.documentId === sender.documentId && tab.url === message.url) {

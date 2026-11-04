@@ -30,6 +30,10 @@ App registrations and native messaging manifests are written only under HKCU and
 3. Confirm Edge selects the existing tab, without changing its page or creating another tab.
 4. Try an unopened URL and confirm exactly one new tab appears.
 
+On webpages, links with `target="_blank"`, Ctrl-click and middle-click also use the same matcher before a tab is created. A matching tab is selected even if sleeping or discarded. Unmatched Ctrl/middle clicks create a background tab; Ctrl+Shift or Shift+middle clicks create a foreground tab. New tabs open next to their source in the source window. Normal same-tab clicks, Shift-only new-window clicks, downloads, non-web URLs and synthetic clicks keep the browser's handling.
+
+After installing or updating, reload the page **containing the links** once to load its click handler. Destination tabs do not need reloading or waking. The handler runs in web frames as well as the main page. It does not intercept Edge's address bar, bookmarks, native context-menu actions, browser-internal/store pages, or script-only popups that are not ordinary anchor new-tab clicks. It needs the browser's site-access permission on the source page. No temporary tab is opened and closed. An uncertain result reports a local error without automatically retrying through a second opening path.
+
 Choose Edge explicitly if needed:
 
 ```powershell
@@ -43,7 +47,7 @@ If the extension is disconnected, the opener reports the setup problem instead o
 
 - The app receives normal HTTP/HTTPS URLs and forwards requests over current-user-only named pipes.
 - The browser launches a copy of the same executable from `%LOCALAPPDATA%\Link Reuse\host\<extension-version>`. Keeping the long-running host outside Scoop's package directory lets Scoop update normally. New copies are staged before replacing the registration; superseded copies are removed after their hosts stop. The host blocks between requests and exits when the browser closes the connection.
-- The extension owns Windows learning and tab selection. It serializes incoming opens, queries live normal tabs, activates a match without navigating it, or creates one tab. The most recently focused connected profile is preferred; explicit profile routing is not yet supported.
+- The extension owns Windows learning and tab selection. External requests and webpage new-tab clicks share one bounded serial queue and matching engine. Both query live normal tabs, activate a match without navigating it, or create one tab. Webpage clicks are handled within the extension without going through the native app. For external requests, the most recently focused connected profile is preferred; explicit profile routing is not yet supported.
 - `extension/matching.mjs` owns shared identity comparison, created-tab associations, privacy gates, budgets and pruning. URL-format knowledge is isolated in `extension/url-rules.mjs`: a rule can provide a resource identity, a decoded lookup target, or an entry/scope identity. Selection, final tab revalidation and association cleanup use the same matching predicate. The format reader never chooses a tab or retains observations. Ordinary redirects and conservative canonical learning remain independent of website rules; unfamiliar authentication flows are not inferred automatically.
 - New tabs prefer the most recently used non-minimized normal window visible to the extension. If all are minimized, the most recently used one is restored. Existing matching tabs are reused even in minimized windows. Window recency is kept in memory and starts fresh when the extension reloads; Edge's last-focused window is used when eligible. Workspace windows must be exposed by Edge's normal window and tab APIs; workspace names are not inferred.
 - Exact URLs, Google Maps place identity, observed redirects and conservative same-origin canonicals use the existing learning policy. Sensitive URLs bypass learning and direct reuse. Private windows are excluded.
@@ -62,9 +66,9 @@ scoop update link-reuse
 
 From Windows 0.1.2 / extension 3.1.2 onward, updates keep the HTTP/HTTPS registration, replace and restart the native host, and reload the extension automatically when its bundled version changes. Reconnection makes at most four timed attempts after a disconnect, then waits for browser activity or a popup request. There is no permanent polling or extra updater process. The ordinary link-opening path is unchanged.
 
-The extension must be loaded from Scoop's stable `current\extension` folder. Before an automatic reload it checks the version in that folder; a stale copy reports an error instead of repeatedly reloading. The ordinary Scoop `current` junction is required for this setup. The current release is Windows 0.1.4 / extension 3.1.4. This update adds the `storage` permission for browser-session memory; allow or re-enable the extension if Edge requests it. It does not read saved browser history. Previously learned redirects need one visit after this update because extension updates clear session storage.
+The extension must be loaded from Scoop's stable `current\extension` folder. Before an automatic reload it checks the version in that folder; a stale copy reports an error instead of repeatedly reloading. The ordinary Scoop `current` junction is required for this setup. The current release is Windows 0.1.5 / extension 3.1.5. Version 0.1.4 added the `storage` permission for browser-session memory; 0.1.5 adds no new permissions. Allow or re-enable the extension if Edge requests it. It does not read saved browser history. Previously learned redirects need one visit after an update because extension updates clear session storage. Reload the source webpage once to load updated click handling.
 
-**One-time transition from 0.1.0 or 0.1.1:** turn off Link Reuse in the browser, run `Stop-Process -Name LinkReuse -Force -ErrorAction SilentlyContinue`, update through Scoop, then turn it back on and check version 3.1.4. Those older releases cannot perform the new restart/reload protocol.
+**One-time transition from 0.1.0 or 0.1.1:** turn off Link Reuse in the browser, run `Stop-Process -Name LinkReuse -Force -ErrorAction SilentlyContinue`, update through Scoop, then turn it back on and check version 3.1.5. Those older releases cannot perform the new restart/reload protocol.
 
 Before uninstalling, select your real browser in Windows Default Apps or restore the destination in your router:
 
@@ -76,7 +80,7 @@ Uninstall removes only registrations owned by this installation and stops its ex
 
 ## Build
 
-The GitHub Windows job does one native compilation, focused JavaScript routing/reconnection/privacy/redirect checks, and native request/framing/current-user-pipe checks. Worker-recreation tests cover sleeping/discarded destinations, startup restore ordering, closure pruning and clearing during an older write. A small Windows file-lock check stages a replacement host outside the package while the preceding host file remains locked, then verifies a same-version reinstall. It does not launch or install browsers; real Edge sleep/restore and a full Scoop update with a connected browser still need a Windows trial.
+The GitHub Windows job does one native compilation, focused JavaScript routing/reconnection/privacy/redirect checks, and native request/framing/current-user-pipe checks. Click tests cover gesture selection, background-tab intent, source-window placement, frame messages and simultaneous native/page requests. Worker-recreation tests cover sleeping/discarded destinations, startup restore ordering, closure pruning and clearing during an older write. A small Windows file-lock check stages a replacement host outside the package while the preceding host file remains locked, then verifies a same-version reinstall. It does not launch or install browsers; real webpage event handling, Edge sleep/restore and a full Scoop update with a connected browser still need a Windows trial.
 
 ```powershell
 dotnet publish windows/LinkReuse/LinkReuse.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -o build/windows-native

@@ -60,20 +60,11 @@ export class WindowsBridge {
         }
         if (message.type === 'open' && typeof message.id === 'string') {
           if (!this.connected) { port.postMessage({ type: 'result', id: message.id, error: this.lastError || 'The extension is still connecting.' }); return; }
-          if (this.pending >= 16) { port.postMessage({ type: 'result', id: message.id, error: 'Too many links are pending. Please try again.' }); return; }
-          this.pending++;
-          this.serial = this.serial.then(async () => {
-            if (this.port !== port) return;
-            try {
-              const parsed = new URL(message.url);
-              if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(message.url).length > 65536) throw new Error('Invalid web link.');
-              const result = await routeToTab(message.url, this.learning, this.browserAPI, this.windowFocusOrder);
-              this.changed();
-              port.postMessage({ type: 'result', id: message.id, ...result });
-            } catch (error) {
-              if (this.port === port) port.postMessage({ type: 'result', id: message.id, error: error.message });
-            }
-          }).catch(() => {}).finally(() => { this.pending--; });
+          void this.open(message.url, {}, port).then(result => {
+            if (this.port === port) port.postMessage({ type: 'result', id: message.id, ...result });
+          }, error => {
+            if (this.port === port) port.postMessage({ type: 'result', id: message.id, error: error.message });
+          });
         }
       });
       port.onDisconnect.addListener(() => {
@@ -98,6 +89,20 @@ export class WindowsBridge {
       port.postMessage({ type: 'hello' });
     });
     return this.ready;
+  }
+  open(url, opening = {}, port) {
+    if (this.pending >= 16) return Promise.reject(new Error('Too many links are pending. Please try again.'));
+    this.pending++;
+    const result = this.serial.then(async () => {
+      if (port && this.port !== port) throw new Error('The browser connection ended.');
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(url).length > 65536) throw new Error('Invalid web link.');
+      const result = await routeToTab(url, this.learning, this.browserAPI, this.windowFocusOrder, opening);
+      this.changed();
+      return result;
+    });
+    this.serial = result.catch(() => {}).finally(() => { this.pending--; });
+    return result;
   }
   persist() {
     this.saving = this.saving.catch(() => {}).then(async () => {

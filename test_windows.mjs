@@ -17,7 +17,7 @@ function slackLink(target, extra = {}) {
 }
 
 function browser(initial, windows = [{ id: 1, focused: true }], lastFocusedId = windows[0]?.id) {
-  const tabs = initial.map((tab, index) => ({ id: index + 1, windowId: 1, status: 'complete', incognito: false, ...tab }));
+  const tabs = initial.map((tab, index) => ({ id: index + 1, index, windowId: 1, status: 'complete', incognito: false, ...tab }));
   const calls = [];
   return { tabs, calls, api: {
     windows: {
@@ -271,6 +271,11 @@ test('the cold background waits for session restore before handling an external 
       { type: 'result', id: 'first-after-idle', result: 'focused' });
     assert.equal(h.tabs.length, 1);
     assert.equal(saved.learning.length, 1);
+    const fromPage = { tab: { ...h.tabs[0] }, frameId: 2 };
+    const send = message => new Promise(resolve => chrome.runtime.onMessage.emit(message, fromPage, resolve));
+    assert.deepEqual(await send({ type: 'page-link-capability' }), { enabled: true });
+    assert.deepEqual(await send({ type: 'page-link', url: 'https://example.test/short', active: false }), { result: 'focused' });
+    assert.equal(h.tabs.length, 1);
     h.tabs.length = 0;
     chrome.tabs.onRemoved.emit(1);
     await new Promise(setImmediate);
@@ -650,4 +655,50 @@ test('two simultaneous external requests create one tab and then reuse it', asyn
   await bridge.serial;
   assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
   assert.deepEqual(sent.filter(value => value.type === 'result').map(value => value.result), ['opened', 'focused']);
+});
+
+test('a webpage new-tab click focuses an unloaded match without creating a tab or contacting its scripts', async () => {
+  const h = browser([{ url: 'https://example.test/source', active: true },
+    { url: 'https://example.test/item', active: false, status: 'unloaded', discarded: true }]);
+  const { bridge } = sessionBridge(h, learningSession());
+  clearTimeout(bridge.timer);
+  assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: 1, active: false }), { result: 'focused' });
+  assert.deepEqual(h.calls, [['focus', 2, { active: true }], ['window', 1, { focused: true }]]);
+  assert.equal(h.tabs.length, 2);
+  clearTimeout(bridge.timer);
+});
+
+test('an unmatched webpage click opens next to its source and preserves background intent', async () => {
+  const h = browser([{ url: 'https://example.test/source', windowId: 2, index: 5 }], [
+    { id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' },
+  ]);
+  const { bridge } = sessionBridge(h, learningSession());
+  clearTimeout(bridge.timer);
+  assert.deepEqual(await bridge.open('https://example.test/new', { sourceTabId: 1, active: false }), { result: 'opened' });
+  assert.deepEqual(h.calls, [['create', { windowId: 2, url: 'https://example.test/new', active: false, index: 6 }]]);
+  clearTimeout(bridge.timer);
+});
+
+test('an unmatched ordinary blank-target link opens a foreground tab in its source window', async () => {
+  const h = browser([{ url: 'https://example.test/source', index: 3 }]);
+  const { bridge } = sessionBridge(h, learningSession());
+  clearTimeout(bridge.timer);
+  assert.deepEqual(await bridge.open('https://example.test/new', { sourceTabId: 1, active: true }), { result: 'opened' });
+  assert.deepEqual(h.calls, [['create', { windowId: 1, url: 'https://example.test/new', active: true, index: 4 }],
+    ['window', 1, { focused: true }]]);
+  clearTimeout(bridge.timer);
+});
+
+test('webpage clicks and external opens share one queue and cannot simultaneously create duplicates', async () => {
+  const h = browser([{ url: 'https://example.test/source' }]);
+  const { bridge, port } = sessionBridge(h, learningSession());
+  clearTimeout(bridge.timer);
+  await bridge.connect();
+  const clicked = bridge.open('https://example.test/new', { sourceTabId: 1, active: false });
+  port.emit({ type: 'open', id: 'external', url: 'https://example.test/new' });
+  assert.deepEqual(await clicked, { result: 'opened' });
+  await bridge.serial;
+  assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
+  assert.equal(port.sent.find(message => message.id === 'external').result, 'focused');
+  clearTimeout(bridge.timer);
 });
