@@ -1,7 +1,5 @@
 import collections
 import http.server
-import json
-import pathlib
 import subprocess
 import threading
 import time
@@ -32,7 +30,6 @@ class Page(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Page)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = f'http://127.0.0.1:{server.server_port}'
-alias_root = pathlib.Path.home() / 'Library/Application Support/Link Reuse/Live/company.thebrowser.Browser'
 
 
 def apple(script):
@@ -58,12 +55,6 @@ def wait_for(check, label):
     raise RuntimeError('Timed out: ' + label)
 
 
-def learned(source, destination):
-    return any(record['kind'] == 'canonical' and record['source'] == source and record.get('destination') == destination
-               for file in alias_root.glob('*.json')
-               for session in json.loads(file.read_text()).get('sessions', []) for record in session.get('records', []))
-
-
 def open_url(url):
     subprocess.run(['open', url], check=True)
 
@@ -76,7 +67,8 @@ try:
     product = base + prefix + '/products/42'
     reviews = product + '/reviews'
     open_url(reviews)
-    wait_for(lambda: learned(reviews, product), 'page-declared canonical recorded by extension')
+    wait_for(lambda: state()[2] == reviews, 'reviews page loaded')
+    time.sleep(.2)
     before = state()
     assert before[2] == reviews, before
     open_url(product)
@@ -105,14 +97,16 @@ try:
     unrelated = base + prefix + '/unrelated'
     apple(f'tell application "Arc" to set URL of tab id "{before[1]}" of front window to "{unrelated}"')
     wait_for(lambda: requests[prefix + '/unrelated'] == 1, 'test tab navigated away')
-    wait_for(lambda: not learned(reviews, product), 'canonical mapping removed after navigation away')
-    print('Canonical relation removed when its tab navigates to another resource', flush=True)
+    open_url(product)
+    wait_for(lambda: requests[prefix + '/products/42'] == 1, 'parent opens normally after reviews tab navigates away')
+    print('Navigating the reviews tab away allows a normal parent open', flush=True)
     open_url(reviews)
-    wait_for(lambda: learned(reviews, product), 'canonical learned again for a newly opened tab')
+    wait_for(lambda: state()[2] == reviews, 'new reviews tab loaded')
     reopened = state()
     apple(f'tell application "Arc" to close tab id "{reopened[1]}" of front window')
-    wait_for(lambda: not learned(reviews, product), 'canonical mapping removed after the reviews tab closes')
-    print('Canonical relation removed when its last matching tab closes', flush=True)
+    open_url(reviews)
+    wait_for(lambda: requests[prefix + '/products/42/reviews'] == 3, 'closed reviews page can open normally again')
+    print('Closing the reviews tab allows it to open normally again', flush=True)
 finally:
     apple(f'''tell application "Arc"
         repeat with wi from 1 to count of windows

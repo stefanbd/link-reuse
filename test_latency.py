@@ -42,7 +42,6 @@ try:
                 time.sleep(0.005)
             if path not in arrived: raise RuntimeError(f'No page request for {kind}')
             measurements[kind].append(round((arrived[path]-start)*1000,1))
-    subprocess.run([str(pathlib.Path(helper) / 'Contents/MacOS/LinkReuse'), '--benchmark', 'Arc'], check=True)
     print(json.dumps({'samples_ms_to_first_page_request':measurements,'medians_ms':{k:statistics.median(v) for k,v in measurements.items()}},indent=2))
 finally:
     cleanup=f'''tell application "Arc"

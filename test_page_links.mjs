@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('./extension/page-links.js', import.meta.url), 'utf8');
 const settle = () => new Promise(setImmediate);
 
-function harness({ enabled = true, reply = { result: 'focused' }, baseTarget, broken = false } = {}) {
+function harness({ enabled = true, platform = 'win', reply = { result: 'focused' }, baseTarget, broken = false } = {}) {
   const listeners = new Map(), sent = [], notices = [];
   const node = () => ({ style: {}, setAttribute() {}, addEventListener() {}, append() {}, remove() {} });
   const document = {
@@ -16,7 +16,7 @@ function harness({ enabled = true, reply = { result: 'focused' }, baseTarget, br
   };
   const runtime = { sendMessage(message) {
     sent.push(message);
-    if (message.type === 'page-link-capability') return Promise.resolve({ enabled });
+    if (message.type === 'page-link-capability') return Promise.resolve({ enabled, platform });
     if (broken) throw new Error('Extension context invalidated.');
     return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
   } };
@@ -38,7 +38,7 @@ function harness({ enabled = true, reply = { result: 'focused' }, baseTarget, br
 
 test('new-tab webpage gestures cancel the default before requesting one shared route', async () => {
   for (const [attributes, event, active] of [
-    [{ target: '_blank' }, {}, true], [{}, { ctrlKey: true }, false], [{}, { metaKey: true }, false],
+    [{ target: '_blank' }, {}, true], [{}, { ctrlKey: true }, false],
     [{}, { type: 'auxclick', button: 1 }, false], [{}, { ctrlKey: true, shiftKey: true }, true],
     [{}, { type: 'auxclick', button: 1, shiftKey: true }, true],
   ]) {
@@ -59,6 +59,16 @@ test('base targets and keyboard activation of a blank-target link are supported'
   await settle();
   assert.equal(h.click({}, { detail: 0 }).cancelled, true);
   assert.equal(h.click({ target: '_self' }).cancelled, undefined);
+});
+
+test('macOS uses Command-click for new tabs and treats Control-click as a regular click', async () => {
+  const h = harness({ platform: 'mac' });
+  await settle();
+  assert.equal(h.click({}, { metaKey: true }).cancelled, true);
+  assert.equal(h.click({}, { metaKey: true, shiftKey: true }).cancelled, true);
+  assert.equal(h.click({ target: '_blank' }, { ctrlKey: true }).cancelled, true);
+  assert.equal(h.click({}, { ctrlKey: true }).cancelled, undefined);
+  assert.equal(h.click({ target: '_blank' }, { type: 'auxclick', button: 2 }).cancelled, undefined);
 });
 
 test('ordinary navigation, downloads, new-window gestures and synthetic clicks keep browser behavior', async () => {

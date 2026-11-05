@@ -2,7 +2,7 @@ name: Windows package
 on:
   workflow_dispatch:
   push:
-    paths: ['windows/**', 'extension/**', 'test_*.mjs', '.github/workflows/windows.yml']
+    paths: ['windows/**', 'extension/**', 'test_*.mjs', '*-vectors.json', '.github/workflows/windows.yml']
 permissions:
   contents: read
 jobs:
@@ -13,10 +13,13 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '26'
       - name: Check matching and build the native Windows executable
         shell: pwsh
         run: |
-          node --test test_windows.mjs test_page_links.mjs test_redirects.mjs test_canonical.mjs test_learning.mjs test_bridge.mjs
+          node --test test_windows.mjs test_page_links.mjs test_redirects.mjs test_canonical.mjs test_learning.mjs test_identity.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet publish windows/LinkReuse/LinkReuse.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -o build/windows-native
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -1,68 +1,84 @@
 import AppKit
 import Darwin
 
-struct NativeRequest: Decodable {
-    let type: String
-    let id: Int?
-    let generation: String?
-    let records: [LearningRecord]?
-    let liveURLs: [String]?
-}
-
-struct NativeReply: Encodable {
-    let ready = true
-    let ack: Int?
-    let generation: String
-    let browser: String
-    let records: Int
-    let bytes: Int
-}
-
 enum NativeHost {
-    static func run(resources: AppResources) throws {
-        let policy = resources.policy
+    actor Exchange {
+        private var pending: [String: CheckedContinuation<BridgeMessage, Error>] = [:]
+
+        func send(_ message: BridgeMessage) throws { try NativeHost.writeFrame(JSONEncoder().encode(message), to: .standardOutput) }
+
+        func request(_ url: String) async throws -> BridgeMessage {
+            guard pending.count < 16 else { throw POSIXError(.EBUSY) }
+            let id = UUID().uuidString
+            let timer = Task {
+                do { try await Task.sleep(for: .seconds(10)); expire(id) } catch {}
+            }
+            defer { timer.cancel() }
+            return try await withCheckedThrowingContinuation { continuation in
+                pending[id] = continuation
+                do { try send(BridgeMessage(type: "open", id: id, url: url)) }
+                catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
+            }
+        }
+
+        func receive(_ message: BridgeMessage) {
+            if let id = message.id { pending.removeValue(forKey: id)?.resume(returning: message) }
+        }
+        func expire(_ id: String) { pending.removeValue(forKey: id)?.resume(throwing: POSIXError(.ETIMEDOUT)) }
+        func finish() { for continuation in pending.values { continuation.resume(throwing: POSIXError(.EPIPE)) }; pending.removeAll() }
+    }
+
+    static func run(resources: AppResources) async throws {
         guard CommandLine.arguments.dropFirst().first == resources.extensionOrigin,
               let parent = NSRunningApplication(processIdentifier: getppid()),
-              let browser = parent.bundleIdentifier, resources.browsers.contains(where: { $0.bundleID == browser }),
-              let started = parent.launchDate?.timeIntervalSince1970 else { throw POSIXError(.EPERM) }
+              let browser = parent.bundleIdentifier, resources.browsers.contains(where: { $0.bundleID == browser }) else { throw POSIXError(.EPERM) }
         signal(SIGPIPE, SIG_IGN)
-        let store = LearningStore(browserID: browser, policy: policy)
-        let owner = LearningSession(id: UUID().uuidString, pid: getpid(), browserPID: parent.processIdentifier,
-                                    browserStarted: started, records: [])
-        defer { try? store.removeSession(owner.id) }
-        var imported = false
+        guard let hello = try readFrame(from: .standardInput), try JSONDecoder().decode(BridgeMessage.self, from: hello).type == "hello" else { throw POSIXError(.EINVAL) }
+        try MacBridge.prepare()
+        guard let started = MacBridge.processStarted(getpid()) else { throw POSIXError(.EPERM) }
+        var session = BridgeSession(id: UUID().uuidString, browser: browser, pid: getpid(), started: started, activeAt: Date.timeIntervalSinceReferenceDate)
+        let server = try MacBridge.descriptor(path: session.socket, listen: true)
+        let exchange = Exchange()
+        let listener = Thread { serve(server, exchange: exchange) }
+        listener.start()
+        defer {
+            listener.cancel()
+            _ = shutdown(server, SHUT_RDWR)
+            close(server)
+            try? FileManager.default.removeItem(at: session.socket)
+            try? FileManager.default.removeItem(at: session.file)
+        }
+        try await exchange.send(BridgeMessage(type: "ready", extensionVersion: resources.extensionVersion))
+        try session.save()
         while let data = try readFrame(from: .standardInput) {
-            let request = try JSONDecoder().decode(NativeRequest.self, from: data)
-            var snapshot: LearningSnapshot
+            let request = try JSONDecoder().decode(BridgeMessage.self, from: data)
             switch request.type {
-            case "hello", "status": snapshot = try store.status()
-            case "clear":
-                snapshot = try store.clear()
-                let (_, files) = try legacyRecords(browser: browser, policy: policy, adding: [])
-                for file in files { try? FileManager.default.removeItem(at: file) }
-                imported = true
-            case "snapshot":
-                let records = request.records ?? []
-                let urls = request.liveURLs ?? []
-                guard records.count <= policy.maxBatchRecords,
-                      urls.reduce(0, { $0 + $1.utf8.count + 3 }) <= policy.maxSnapshotBytes,
-                      let generation = request.generation else { throw POSIXError(.EINVAL) }
-                var additions = records
-                var legacy: [URL] = []
-                if !imported {
-                    (additions, legacy) = try legacyRecords(browser: browser, policy: policy, adding: additions)
-                }
-                snapshot = try store.update(owner: owner, generation: generation, records: additions, liveURLs: urls)
-                if generation == snapshot.generation {
-                    for file in legacy { try? FileManager.default.removeItem(at: file) }
-                    imported = true
-                }
+            case "result": await exchange.receive(request)
+            case "activity": session.activeAt = Date.timeIntervalSinceReferenceDate; try session.save()
             default: throw POSIXError(.EINVAL)
             }
-            let reply = NativeReply(ack: request.id, generation: snapshot.generation, browser: browser,
-                                    records: snapshot.sessions.reduce(0, { $0 + $1.records.count }),
-                                    bytes: (try JSONEncoder().encode(snapshot)).count)
-            try writeFrame(JSONEncoder().encode(reply), to: .standardOutput)
+        }
+        await exchange.finish()
+    }
+
+    static func serve(_ server: Int32, exchange: Exchange) {
+        while !Thread.current.isCancelled {
+            let client = accept(server, nil, nil)
+            guard client >= 0 else { return }
+            MacBridge.configure(client)
+            let stream = FileHandle(fileDescriptor: client, closeOnDealloc: true)
+            do {
+                guard let data = try readFrame(from: stream) else { throw POSIXError(.EIO) }
+                let request = try JSONDecoder().decode(BridgeMessage.self, from: data)
+                guard request.type == "open", let url = request.url, isWebLink(url) else { throw POSIXError(.EINVAL) }
+                Task {
+                    do {
+                        let reply = try await exchange.request(url)
+                        try writeFrame(JSONEncoder().encode(reply), to: stream)
+                    } catch {}
+                    try? stream.close()
+                }
+            } catch { try? stream.close() }
         }
     }
 
@@ -90,21 +106,4 @@ enum NativeHost {
         try output.write(contentsOf: withUnsafeBytes(of: &length) { Data($0) } + data)
     }
 
-    private static func legacyRecords(browser: String, policy: LearningPolicy, adding records: [LearningRecord]) throws -> ([LearningRecord], [URL]) {
-        let directory = URL.applicationSupportDirectory.appending(path: "Link Reuse/Aliases/\(browser)")
-        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        var result = records
-        for file in files where file.pathExtension == "json" {
-            guard result.count < policy.maxRecords,
-                  (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max <= policy.maxCacheBytes,
-                  let data = try? Data(contentsOf: file),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            for (field, kind) in [("aliases", "redirect"), ("canonicals", "canonical")] {
-                for (source, destination) in object[field] as? [String: String] ?? [:] where result.count < policy.maxRecords {
-                    result.append(LearningRecord(kind: kind, source: source, destination: destination))
-                }
-            }
-        }
-        return (result, files.filter { ["json", "lock"].contains($0.pathExtension) })
-    }
 }

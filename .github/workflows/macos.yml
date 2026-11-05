@@ -1,0 +1,29 @@
+name: macOS package
+on:
+  workflow_dispatch:
+  push:
+    paths: ['*.swift', '*.py', 'extension/**', 'browsers.json', '*-vectors.json', 'test_*.mjs', '.github/workflows/macos.yml']
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '26'
+      - name: Verify shared routing and native macOS bridge
+        run: python3 verify.py
+      - name: Build universal application
+        run: python3 build.py
+      - name: Package
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent 'build/Link Reuse.app' build/link-reuse-macos-3.1.6.zip
+          shasum -a 256 build/link-reuse-macos-3.1.6.zip > build/link-reuse-macos-3.1.6.zip.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: link-reuse-macos
+          path: |
+            build/link-reuse-macos-*.zip
+            build/link-reuse-macos-*.sha256

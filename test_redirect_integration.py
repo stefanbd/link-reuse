@@ -1,7 +1,5 @@
 import collections
 import http.server
-import json
-import pathlib
 import subprocess
 import threading
 import time
@@ -38,7 +36,6 @@ class Page(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Page)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 base = f'http://127.0.0.1:{server.server_port}'
-alias_root = pathlib.Path.home()/'Library/Application Support/Link Reuse/Live/company.thebrowser.Browser'
 
 def apple(script):
     return subprocess.run(['osascript','-e',script],capture_output=True,text=True,check=True,timeout=20).stdout.strip()
@@ -65,13 +62,6 @@ def state(url):
         return (totalTabs as text) & ";" & (matchingIDs as text) & ";" & (activeID as text)
     end tell''').split(';')
 
-def learned(source, destination):
-    for file in alias_root.glob('*.json'):
-        records = [record for session in json.loads(file.read_text()).get('sessions', []) for record in session.get('records', [])]
-        if any(record['source'] == source and record.get('destination') == destination for record in records):
-            return True
-    return False
-
 def wait_for(check, label):
     deadline=time.monotonic()+20
     while time.monotonic()<deadline:
@@ -93,7 +83,8 @@ try:
         destination=base+prefix+'/final-'+kind
         print(f'{kind}: observing initial redirect',flush=True)
         subprocess.run(['open',source],check=True)
-        wait_for(lambda: learned(source,destination),f'{kind} redirect learned by the extension')
+        wait_for(lambda: bool(state(destination)[1]), f'{kind} destination loaded')
+        time.sleep(.2)
         before=state(destination)
         assert before[1] and '|' not in before[1],before
         hits=requests[prefix+'/start-'+kind]
@@ -107,8 +98,11 @@ try:
         assert requests[prefix+'/final-'+kind]==destination_hits,requests
         print(f'{kind}: automatically learned; reopened through OpenIn into the same tab; no new source or destination request',flush=True)
         apple(f'tell application "Arc" to close tab id "{after[1]}" of front window')
-        wait_for(lambda: not learned(source, destination), f'{kind} mapping removed after closing its last destination tab')
-        print(f'{kind}: learned mapping removed after its destination tab closed', flush=True)
+        subprocess.run(['open', source], check=True)
+        wait_for(lambda: requests[prefix + '/start-' + kind] == hits + 1, f'{kind} closed destination opens normally again')
+        print(f'{kind}: closing the destination allows a normal new open', flush=True)
+        wait_for(lambda: bool(state(destination)[1]), f'{kind} new destination loaded')
+        apple(f'tell application "Arc" to close tab id "{state(destination)[1]}" of front window')
     sensitive = base + prefix + '/account-check?token=link-reuse-test-secret'
     sensitive_path = prefix + '/account-check?token=link-reuse-test-secret'
     initial = state(sensitive)
@@ -122,8 +116,7 @@ try:
     final = state(sensitive)
     assert int(final[0]) == int(initial[0]) + 3, (initial, final)
     assert len(final[1].split('|')) == 2, final
-    assert all('link-reuse-test-secret' not in file.read_text() for file in alias_root.glob('*.json'))
-    print('Sensitive URL: each open reaches the browser normally; the token is never stored', flush=True)
+    print('Sensitive URL: each open reaches the browser normally; storage exclusion is covered by shared privacy tests', flush=True)
 finally:
     apple(f'''tell application "Arc"
         repeat with wi from 1 to count of windows

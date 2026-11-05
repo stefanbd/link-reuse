@@ -1,6 +1,10 @@
 (() => {
   let enabled = false;
-  chrome.runtime.sendMessage({ type: 'page-link-capability' }).then(reply => { enabled = reply?.enabled === true; }).catch(() => {});
+  let mac = false;
+  chrome.runtime.sendMessage({ type: 'page-link-capability' }).then(reply => {
+    enabled = reply?.enabled === true;
+    mac = reply?.platform === 'mac';
+  }).catch(() => {});
 
   function failed() {
     if (document.getElementById('link-reuse-error')) return;
@@ -20,7 +24,7 @@
   function open(event) {
     if (!enabled || !event.isTrusted || event.defaultPrevented || event.altKey) return;
     const middle = event.type === 'auxclick' && event.button === 1;
-    const modified = event.ctrlKey || event.metaKey;
+    const modified = mac ? event.metaKey : event.ctrlKey;
     if (!middle && (event.type !== 'click' || event.button !== 0)) return;
     if (event.shiftKey && !middle && !modified) return;
     const anchor = event.composedPath().find(value => value.localName === 'a' && value.hasAttribute('href'));

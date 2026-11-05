@@ -1,5 +1,5 @@
 import { allowsLearning } from './learning.mjs';
-import { urlRules } from './url-rules.mjs';
+import { urlRules, normalizedKey } from './url-rules.mjs';
 
 function urlKey(value) {
   try {
@@ -27,10 +27,11 @@ export class LiveLearning {
       const key = pending.pop();
       if (!key || keys.has(key)) continue;
       keys.add(key);
+      keys.add(normalizedKey(key, this.policy));
       const identity = this.rules(key, this.policy).identity;
       if (identity) keys.add(identity);
       for (const kind of ['redirect', 'canonical']) {
-        const destination = this.records.get(kind + '\n' + key)?.destination;
+        const destination = this.records.get(kind + '\n' + normalizedKey(key, this.policy))?.destination;
         if (destination) pending.push(destination);
       }
     }
@@ -68,7 +69,7 @@ export class LiveLearning {
   observe(records) {
     for (const record of records) {
       if (!['redirect', 'canonical'].includes(record.kind) || !allowsLearning(record.source, this.policy)) continue;
-      const key = record.kind + '\n' + urlKey(record.source);
+      const key = record.kind + '\n' + normalizedKey(record.source, this.policy);
       if (record.destination === null || !allowsLearning(record.destination, this.policy)) { this.remove(key); continue; }
       this.put(key, { source: urlKey(record.source), destination: urlKey(record.destination) });
     }

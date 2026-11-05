@@ -1,18 +1,17 @@
 import { RedirectObserver } from './observer.mjs';
 import { canonicalDestination } from './canonical.mjs';
 import { allowsLearning } from './learning.mjs';
-import { NativeBridge } from './bridge.mjs';
-import { WindowsBridge } from './windows-bridge.mjs';
+import { BrowserBridge } from './browser-bridge.mjs';
 
 const observer = new RedirectObserver();
 const ready = Promise.all([
   fetch(chrome.runtime.getURL('learning-policy.json')).then(response => response.json()),
   chrome.runtime.getPlatformInfo(),
 ]).then(async ([policy, platform]) => {
-  observer.maxSources = policy.maxBatchRecords;
-  const saved = platform.os === 'win' ? await chrome.storage.session.get('learning') : {};
-  const Bridge = platform.os === 'win' ? WindowsBridge : NativeBridge;
-  const bridge = new Bridge(policy, {
+  observer.maxSources = policy.maxRedirectSources;
+  const saved = await chrome.storage.session.get('learning');
+  const bridge = new BrowserBridge(policy, {
+    platform: platform.os,
     connectPort: () => {
       const port = chrome.runtime.connectNative('me.dichev.link_reuse');
       port.onDisconnect.addListener(() => { void chrome.runtime.lastError; });
@@ -26,11 +25,13 @@ const ready = Promise.all([
     extensionVersion: chrome.runtime.getManifest().version,
     reload: async version => {
       const manifest = await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' }).then(response => response.json());
-      if (manifest.version !== version) throw new Error('Load Link Reuse from the installed scoop/apps/link-reuse/current/extension folder to receive updates.');
+      if (manifest.version !== version) throw new Error(platform.os === 'win' ?
+        'Load Link Reuse from the installed scoop/apps/link-reuse/current/extension folder to receive updates.' :
+        'Load Link Reuse from the installed Link Reuse.app/Contents/Resources/extension folder to receive updates.');
       chrome.runtime.reload();
     },
   });
-  return { policy, bridge };
+  return { policy, bridge, platform: platform.os };
 });
 
 function navigate(event, operation) {
@@ -69,21 +70,21 @@ chrome.windows.onFocusChanged.addListener(windowId => {
 chrome.windows.onRemoved.addListener(windowId => { void ready.then(({ bridge }) => bridge.forgetWindow?.(windowId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (['page-link-capability', 'page-link'].includes(message.type) && sender.tab && !sender.tab.incognito) {
-    void ready.then(({ bridge }) => {
-      if (message.type === 'page-link-capability') return { enabled: typeof bridge.open === 'function' };
+    void ready.then(({ bridge, platform }) => {
+      if (message.type === 'page-link-capability') return { enabled: true, platform };
       if (!bridge.open) throw new Error('Webpage link reuse is unavailable in this browser.');
       return bridge.open(message.url, { sourceTabId: sender.tab.id, active: message.active !== false });
     }).then(respond, error => respond({ error: error.message }));
     return true;
   }
   if (message.type === 'canonical' && sender.tab && sender.frameId === 0) {
-    const tab = observer.tabs.get(sender.tab.id);
-    if (tab?.documentId === sender.documentId && tab.url === message.url) {
-      void ready.then(({ bridge }) => bridge.observe([{ kind: 'canonical', source: message.url,
-        destination: canonicalDestination(message.url, message.hrefs) }]));
-    }
+    void ready.then(({ bridge }) => {
+      const tab = observer.tabs.get(sender.tab.id);
+      if (tab?.documentId === sender.documentId && tab.url === message.url) bridge.observe([{ kind: 'canonical', source: message.url,
+        destination: canonicalDestination(message.url, message.hrefs) }]);
+    });
   }
-  if (message.type === 'interaction' && sender.tab && sender.frameId === 0) observer.interact(sender.tab.id, sender.documentId);
+  if (message.type === 'interaction' && sender.tab && sender.frameId === 0) void ready.then(() => observer.interact(sender.tab.id, sender.documentId));
   if (['status', 'clear-learning'].includes(message.type) && !sender.tab) {
     void ready.then(async ({ bridge }) => {
       if (message.type === 'clear-learning') await bridge.clear();

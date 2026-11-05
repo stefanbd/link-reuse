@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { LiveLearning, routeToTab } from './extension/matching.mjs';
-import { WindowsBridge } from './extension/windows-bridge.mjs';
+import { BrowserBridge as WindowsBridge } from './extension/browser-bridge.mjs';
 import { urlRules } from './extension/url-rules.mjs';
 
 const policy = JSON.parse(readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
@@ -233,7 +233,7 @@ test('unchanged tab activity does not rewrite session learning', async context =
   assert.deepEqual(session.read(), []);
 });
 
-test('the cold background waits for session restore before handling an external open', async context => {
+for (const platform of ['win', 'mac']) test(`the ${platform} background restores learning before external and webpage opens`, async context => {
   const pending = timers(context);
   const h = browser([{ url: 'https://example.test/live', status: 'unloaded', discarded: true }]);
   const port = nativePort();
@@ -243,7 +243,7 @@ test('the cold background waits for session restore before handling an external 
   let saved;
   const previousChrome = globalThis.chrome;
   globalThis.chrome = {
-    runtime: { async getPlatformInfo() { return { os: 'win' }; }, getURL: value => 'https://extension.test/' + value,
+    runtime: { async getPlatformInfo() { return { os: platform }; }, getURL: value => 'https://extension.test/' + value,
       getManifest: () => ({ version: '3.1.3' }), connectNative: () => port, onStartup: event(), onMessage: event() },
     storage: { session: { get: () => new Promise(resolve => { release = resolve; }),
       async set(value) { saved = structuredClone(value); } } },
@@ -256,10 +256,13 @@ test('the cold background waits for session restore before handling an external 
   };
   context.mock.method(globalThis, 'fetch', async () => ({ async json() { return policy; } }));
   try {
-    await import('./extension/background.mjs?session-restore');
+    await import('./extension/background.mjs?session-restore=' + platform);
     await new Promise(setImmediate);
     chrome.tabs.onUpdated.emit(1, { discarded: true, status: 'unloaded' });
     chrome.runtime.onStartup.emit();
+    chrome.webNavigation.onCommitted.emit({ frameId: 0, tabId: 1, url: h.tabs[0].url, documentId: 'early' });
+    chrome.runtime.onMessage.emit({ type: 'canonical', url: h.tabs[0].url, hrefs: ['https://example.test/live?view=main'] },
+      { tab: h.tabs[0], frameId: 0, documentId: 'early' }, () => {});
     assert.equal(pending.size, 0);
     release({ learning: [{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }] });
     await new Promise(setImmediate);
@@ -270,10 +273,10 @@ test('the cold background waits for session restore before handling an external 
     assert.deepEqual(port.sent.find(message => message.id === 'first-after-idle'),
       { type: 'result', id: 'first-after-idle', result: 'focused' });
     assert.equal(h.tabs.length, 1);
-    assert.equal(saved.learning.length, 1);
+    assert.equal(saved.learning.length, 2);
     const fromPage = { tab: { ...h.tabs[0] }, frameId: 2 };
     const send = message => new Promise(resolve => chrome.runtime.onMessage.emit(message, fromPage, resolve));
-    assert.deepEqual(await send({ type: 'page-link-capability' }), { enabled: true });
+    assert.deepEqual(await send({ type: 'page-link-capability' }), { enabled: true, platform });
     assert.deepEqual(await send({ type: 'page-link', url: 'https://example.test/short', active: false }), { result: 'focused' });
     assert.equal(h.tabs.length, 1);
     h.tabs.length = 0;

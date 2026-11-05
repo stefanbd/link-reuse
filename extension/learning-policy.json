@@ -2,12 +2,37 @@
   "maxURLBytes": 4096,
   "maxCacheBytes": 2097152,
   "maxRecords": 4096,
-  "maxPendingRecords": 128,
-  "maxPendingBytes": 131072,
-  "maxBatchRecords": 32,
-  "maxSnapshotBytes": 524288,
+  "maxRedirectSources": 32,
   "blockedQueryKeys": ["code", "token", "accesstoken", "refreshtoken", "idtoken", "loginhint", "auth", "authorization", "password", "passwd", "pwd", "secret", "clientsecret", "apikey", "key", "signature", "sig", "samlrequest", "samlresponse", "samlart", "ticket", "session", "sessionid", "jwt", "otp", "oobcode", "logintoken", "resettoken", "verificationtoken"],
   "blockedQueryPrefixes": ["xamz", "xgoog"],
   "blockedPathSegments": ["login", "logininitiateredirect", "signin", "signout", "logout", "oauth", "oauth2", "authorize", "authorization", "callback", "sso", "saml", "password", "reset", "resetpassword", "passwordreset", "verify", "verification", "magiclink", "auth", "activate", "authentication"],
-  "blockedHostPrefixes": ["accounts.", "login.", "signin.", "auth.", "sso.", "oauth."]
+  "blockedHostPrefixes": ["accounts.", "login.", "signin.", "auth.", "sso.", "oauth."],
+  "noiseQueryKeys": ["fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid", "yclid", "twclid", "ttclid", "igshid", "mceid", "mccid", "hsenc", "hsmi"],
+  "noiseQueryPrefixes": ["utm_"],
+  "identityRules": [
+    {
+      "name": "jira-issue",
+      "host": "[a-z0-9-]+\\.atlassian\\.net",
+      "path": "/browse/([A-Za-z][A-Za-z0-9_]*-[0-9]+)/?",
+      "identity": "$1",
+      "uppercase": true,
+      "ignoreAnchor": true,
+      "noiseQueryKeys": ["searchid", "notificationreferrerid", "refsrc"]
+    },
+    {
+      "name": "confluence-page",
+      "host": "[a-z0-9-]+\\.atlassian\\.net",
+      "path": "/wiki/spaces/[^/]+/pages/([0-9]+)(?:/[^/]*)?/?",
+      "identity": "$1",
+      "ignoreAnchor": true,
+      "noiseQueryKeys": ["searchid", "notificationreferrerid", "refsrc"]
+    },
+    {
+      "name": "github-thread",
+      "host": "github\\.com",
+      "path": "/([^/]+/[^/]+/(?:issues|pull)/[0-9]+)(?:/(?:files|commits))?/?",
+      "identity": "$1",
+      "ignoreAnchor": true
+    }
+  ]
 }

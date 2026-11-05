@@ -4,31 +4,34 @@
     "name": "Arc",
     "bundleID": "company.thebrowser.Browser",
     "appPath": "/Applications/Arc.app",
-    "profilePath": "Arc/User Data",
-    "script": "Arc"
+    "profilePath": "Arc/User Data"
   },
   {
     "id": "Chrome",
     "name": "Google Chrome",
     "bundleID": "com.google.Chrome",
     "appPath": "/Applications/Google Chrome.app",
-    "profilePath": "Google/Chrome",
-    "script": "Browser"
+    "profilePath": "Google/Chrome"
   },
   {
     "id": "Brave",
     "name": "Brave Browser",
     "bundleID": "com.brave.Browser",
     "appPath": "/Applications/Brave Browser.app",
-    "profilePath": "BraveSoftware/Brave-Browser",
-    "script": "Browser"
+    "profilePath": "BraveSoftware/Brave-Browser"
   },
   {
     "id": "EdgeBeta",
     "name": "Microsoft Edge Beta",
     "bundleID": "com.microsoft.edgemac.Beta",
     "appPath": "/Applications/Microsoft Edge Beta.app",
-    "profilePath": "Microsoft Edge Beta",
-    "script": "Browser"
+    "profilePath": "Microsoft Edge Beta"
+  },
+  {
+    "id": "Edge",
+    "name": "Microsoft Edge",
+    "bundleID": "com.microsoft.edgemac",
+    "appPath": "/Applications/Microsoft Edge.app",
+    "profilePath": "Microsoft Edge"
   }
 ]

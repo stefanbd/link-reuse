@@ -1,6 +1,6 @@
 import Foundation
 
-struct OpenRequest: Equatable {
+struct OpenRequest: Equatable, Sendable {
     let browser: BrowserConfiguration
     let url: URL
 
@@ -11,7 +11,7 @@ struct OpenRequest: Equatable {
               components.fragment == nil,
               let browser = browsers.first(where: { components.path == "/" + $0.id }),
               let items = components.queryItems, items.count == 1, items[0].name == "url",
-              let value = items[0].value, urlKey(value) != nil,
+              let value = items[0].value, isWebLink(value),
               let target = URL(string: value) else { return nil }
         self.browser = browser
         url = target

@@ -1,9 +1,9 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
 
-export class WindowsBridge {
+export class BrowserBridge {
   constructor(policy, { connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome, extensionVersion, reload,
-    learningState, saveLearning = async () => {} }) {
-    Object.assign(this, { policy, connectPort, queryTabs, resetLearning, badge, browserAPI, extensionVersion, reload, saveLearning });
+    learningState, saveLearning = async () => {}, platform = 'win' }) {
+    Object.assign(this, { policy, connectPort, queryTabs, resetLearning, badge, browserAPI, extensionVersion, reload, saveLearning, platform });
     this.learning = new LiveLearning(policy);
     this.learning.restore(learningState);
     this.saving = Promise.resolve();
@@ -74,8 +74,10 @@ export class WindowsBridge {
         this.connected = false;
         const delay = Math.min(5000 * 2 ** this.reconnectAttempts, 20000);
         this.retryAt = Date.now() + delay;
-        this.lastError = this.reconnectAttempts < 4 ? 'Windows helper disconnected. Reconnecting automatically…' :
-          'Could not reconnect to the Windows helper. Run link-reuse --install, then open this popup again.';
+        this.lastError = this.reconnectAttempts < 4 ? 'Browser helper disconnected. Reconnecting automatically…' :
+          'Could not reconnect to the browser helper. ' + (this.platform === 'mac' ?
+            'Run the installed Link Reuse app with --install, then open this popup again.' :
+            'Run link-reuse --install, then open this popup again.');
         this.badge('!');
         reject(new Error(this.lastError));
         if (this.reconnectAttempts < 4) {

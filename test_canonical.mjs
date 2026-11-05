@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { canonicalDestination as canonical } from './extension/canonical.mjs';
 
 test('a declared product or article canonical groups its deeper views', () => {
@@ -27,4 +29,26 @@ test('cross-origin, fragment routes, credentials and malformed URLs are rejected
 });
 test('self canonical clears an old equivalence instead of creating a cycle', () => {
   assert.equal(canonical('https://shop.test/a', ['https://shop.test/a']), null);
+});
+
+function readMetadata(canonicals, graphURLs) {
+  const messages = [];
+  let observed;
+  vm.runInNewContext(readFileSync(new URL('./extension/canonical.js', import.meta.url), 'utf8'), {
+    location: { href: 'https://shop.test/item/reviews' },
+    document: { readyState: 'complete', head: { querySelectorAll: selector => selector.startsWith('link') ?
+      canonicals.map(href => ({ href })) : graphURLs.map(content => ({ content })) } },
+    MutationObserver: class { constructor() {} observe(_head, options) { observed = options; } },
+    chrome: { runtime: { onMessage: { addListener() {} }, sendMessage: async message => { messages.push(message); } } },
+  });
+  return { hrefs: Array.from(messages[0].hrefs), observed };
+}
+
+test('the content script uses Open Graph only when no canonical is declared', () => {
+  assert.deepEqual(readMetadata([], ['https://shop.test/item']).hrefs, ['https://shop.test/item']);
+  assert.deepEqual(readMetadata(['https://shop.test/explicit'], ['https://shop.test/item']).hrefs, ['https://shop.test/explicit']);
+  assert.equal(canonical('https://shop.test/item/reviews', readMetadata([], ['https://other.test/item']).hrefs), null);
+  assert.equal(canonical('https://shop.test/item/reviews', readMetadata([], ['https://shop.test/item', 'https://shop.test/other']).hrefs), null);
+  const filter = Array.from(readMetadata([], []).observed.attributeFilter);
+  assert.ok(filter.includes('content') && filter.includes('property'));
 });

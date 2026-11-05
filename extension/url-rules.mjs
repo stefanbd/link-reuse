@@ -1,3 +1,38 @@
+const compiledPolicies = new WeakMap();
+
+export function normalizedKey(value, policy, rule = {}) {
+  const url = new URL(value);
+  const names = [...(policy.noiseQueryKeys ?? []), ...(rule.noiseQueryKeys ?? [])];
+  for (const key of [...url.searchParams.keys()]) {
+    const name = key.toLowerCase().replace(/[-_]/g, '');
+    if (names.includes(name) || (policy.noiseQueryPrefixes ?? []).some(prefix => key.toLowerCase().startsWith(prefix))) url.searchParams.delete(key);
+  }
+  url.searchParams.sort();
+  if (rule.ignoreAnchor === true && !url.hash.startsWith('#/') && !url.hash.startsWith('#!')) url.hash = '';
+  return url.href;
+}
+
+function ruleIdentity(url, policy) {
+  let rules = compiledPolicies.get(policy);
+  if (!rules) {
+    rules = (policy.identityRules ?? []).flatMap(rule => {
+      try {
+        if (!['name', 'host', 'path', 'identity'].every(key => typeof rule[key] === 'string' && rule[key])) return [];
+        return [{ ...rule, hostPattern: new RegExp('^(?:' + rule.host + ')$', 'i'), pathPattern: new RegExp('^(?:' + rule.path + ')$') }];
+      }
+      catch { return []; }
+    });
+    compiledPolicies.set(policy, rules);
+  }
+  for (const rule of rules) {
+    if (!rule.hostPattern.test(url.hostname) || !rule.pathPattern.test(url.pathname)) continue;
+    const id = url.pathname.replace(rule.pathPattern, rule.identity);
+    const normalized = new URL(normalizedKey(url.href, policy, rule));
+    return JSON.stringify([rule.name, normalized.origin, rule.uppercase === true ? id.toUpperCase() : id, normalized.search, normalized.hash]);
+  }
+  return null;
+}
+
 function mapsPlaceIdentity(url) {
   if (!['google.com', 'www.google.com', 'maps.google.com'].includes(url.hostname) || !url.pathname.startsWith('/maps/place/')) return null;
   const ids = new Set([...url.pathname.toLowerCase().matchAll(/!4m\d+!3m\d+!1s(0x[0-9a-f]+:0x[0-9a-f]+)(?=!|$)/g)].map(match => match[1]));
@@ -38,7 +73,7 @@ export function urlRules(value, policy) {
     const scope = snowflakeScope(url);
     const bounded = typeof value === 'string' && new TextEncoder().encode(value).length <= policy.maxURLBytes;
     return {
-      identity: mapsPlaceIdentity(url),
+      identity: mapsPlaceIdentity(url) || ruleIdentity(url, policy),
       scope,
       entry: scope && bounded && snowflakeEntry(url) ? scope : null,
       target: bounded ? slackTarget(url) : null,
