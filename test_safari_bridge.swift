@@ -95,18 +95,17 @@ struct SafariBridgeTests {
             preconditionFailure("Incorrect authentication accepted")
         } catch {}
 
+        let interrupted = Task { try await bridge.open("https://example.test/interrupted") }
+        _ = try await receive(socket)
+        try await socket.close(code: .protocolCode(.goingAway))
+        do { _ = try await interrupted.value; preconditionFailure("Disconnected request survived") }
+        catch let error as POSIXError { precondition(error.code == .EPIPE) }
         for _ in 0..<18 {
             let replacement = try await connect(descriptor)
             let response = try await receive(replacement)
             precondition(response.type == "ready")
             try await replacement.close(code: .protocolCode(.goingAway))
         }
-
-        let interrupted = Task { try await bridge.open("https://example.test/interrupted") }
-        _ = try await receive(socket)
-        try await socket.close(code: .protocolCode(.goingAway))
-        do { _ = try await interrupted.value; preconditionFailure("Disconnected request survived") }
-        catch let error as POSIXError { precondition(error.code == .EPIPE) }
         await bridge.stop()
         print("Safari loopback-only WebSocket, token authentication, one-time bootstrap, warm reuse and disconnect handling passed")
     }

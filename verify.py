@@ -16,6 +16,7 @@ for test, sources in [('test_open_request.swift', common),
     executable = output / pathlib.Path(test).stem
     subprocess.run(['xcrun', 'swiftc', '-swift-version', '6', '-module-cache-path', str(root / 'build/module-cache'),
                     *sources, test, '-o', str(executable)], cwd=root, check=True)
-    subprocess.run([str(executable)], cwd=root, check=True)
+    print('Running ' + test, flush=True)
+    subprocess.run([str(executable)], cwd=root, check=True, timeout=60)
 subprocess.run(['python3', '-m', 'unittest', 'test_packaging', 'test_install'], cwd=root, check=True)
 subprocess.run(['python3', '-m', 'py_compile', *map(str, root.glob('*.py'))], check=True)
