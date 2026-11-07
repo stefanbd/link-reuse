@@ -17,7 +17,7 @@ function safari({ claim = 'accepted', fail = false, pending } = {}) {
     async sendNativeMessage(_name, message) {
       sent.push(message);
       if (fail) throw new Error('Native handler unavailable');
-      return message.type === 'hello' ? { type: 'ready', extensionVersion: '3.2.2', ...(pending ? { requests: pending } : {}) } : { type: 'receipt', result: claim };
+      return message.type === 'hello' ? { type: 'ready', extensionVersion: '3.2.3', ...(pending ? { requests: pending } : {}) } : { type: 'receipt', result: claim };
     },
   } };
   return { api, sent, get disconnected() { return disconnected; },
@@ -32,7 +32,7 @@ test('Safari translates native messaging into the same ready/open/result contrac
   port.onMessage.addListener(message => messages.push(message));
   port.postMessage({ type: 'hello' });
   await new Promise(setImmediate);
-  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.2' }]);
+  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.3' }]);
   const opening = { type: 'open', id: 'request', url: 'https://example.test/item' };
   h.emit(opening);
   await new Promise(setImmediate);
@@ -123,7 +123,7 @@ test('document handshake retains interaction even when there was no redirect', (
   assert.deepEqual(observer.history(event(b, 'one')), []);
 });
 
-test('Safari URL updates learn same-document routes without Chromium history events', async context => {
+test('Safari URL updates and verified document messages retain automatic rewrites when frame URLs lag', async context => {
   const event = () => ({ callbacks: [], addListener(fn) { this.callbacks.push(fn); }, emit(...args) { for (const fn of this.callbacks) fn(...args); } });
   const original = globalThis.chrome;
   const raw = safari();
@@ -135,8 +135,8 @@ test('Safari URL updates learn same-document routes without Chromium history eve
   context.mock.method(globalThis, 'setTimeout', (fn, delay) => { const id = ++sequence; scheduled.set(id, { fn, delay }); return id; });
   context.mock.method(globalThis, 'clearTimeout', id => scheduled.delete(id));
   globalThis.chrome = {
-    runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.2' }), onMessage: event(), onStartup: event() },
-    storage: { session: { async get() { return {}; }, async set() {} } },
+    runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.3' }), onMessage: event(), onStartup: event() },
+    storage: { local: { async get() { return {}; }, async set() {} } },
     tabs: { async query() { return [{ ...tab }]; }, async get() { return { ...tab }; },
       async update(id) { focused.push(id); }, async create() { throw Error('Unexpected duplicate'); },
       async sendMessage() { return { url: tab.url, referrer: '', interacted: false }; },
@@ -163,6 +163,25 @@ test('Safari URL updates learn same-document routes without Chromium history eve
     await new Promise(setImmediate);
     assert.deepEqual(focused, [1]);
     assert.deepEqual(raw.sent.find(message => message.type === 'result'), { type: 'result', id: 'open', result: 'focused' });
+    tab.url = b + '/';
+    chrome.tabs.onUpdated.emit(1, { url: tab.url });
+    await new Promise(setImmediate);
+    chrome.runtime.onMessage.emit({ type: 'canonical', url: tab.url, hrefs: [] },
+      { tab: { ...tab }, frameId: 0, documentId: 'current' }, () => {});
+    await new Promise(setImmediate);
+    chrome.runtime.onMessage.emit({ type: 'canonical', url: b, hrefs: [] },
+      { tab: { ...tab }, frameId: 0, documentId: 'current' }, () => {});
+    chrome.runtime.onMessage.emit({ type: 'canonical', url: tab.url, hrefs: [b] },
+      { tab: { ...tab }, frameId: 0, documentId: 'stale' }, () => {});
+    await new Promise(setImmediate);
+    const retained = await new Promise(resolve => chrome.runtime.onMessage.emit({ type: 'status' }, {}, resolve));
+    assert.equal(retained.stats.records, 2);
+    raw.emit({ type: 'open', id: 'after-rewrite', url: a });
+    await new Promise(setImmediate);
+    await new Promise(setImmediate);
+    assert.deepEqual(raw.sent.find(message => message.id === 'after-rewrite' && message.type === 'result'),
+      { type: 'result', id: 'after-rewrite', result: 'focused' });
+    assert.deepEqual(focused, [1, 1]);
     tab.url = c; frame = { url: c, documentId: 'new-document' };
     chrome.tabs.onUpdated.emit(1, { url: c });
     await new Promise(setImmediate);

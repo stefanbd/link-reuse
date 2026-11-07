@@ -196,7 +196,7 @@ test('restoring during a pending navigation retains the committed page only unti
   assert.equal(learning.records.size, 0);
 });
 
-test('session write failures are reported and retried on the next change', async context => {
+test('cache write failures are reported and retried on the next change', async context => {
   const pending = timers(context);
   const h = browser([{ url: 'https://example.test/live' }]);
   const session = learningSession();
@@ -204,7 +204,7 @@ test('session write failures are reported and retried on the next change', async
   bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
   await assert.rejects(settleBridge(bridge, pending), /Storage unavailable/);
   const status = await bridge.status();
-  assert.match(status.lastError, /Could not keep learned links/);
+  assert.match(status.lastError, /Could not save learned links/);
   bridge.saveLearning = records => session.save(records);
   bridge.changed();
   await settleBridge(bridge, pending);
@@ -233,7 +233,7 @@ test('unchanged tab activity does not rewrite session learning', async context =
   assert.deepEqual(session.read(), []);
 });
 
-for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restores learning before external and webpage opens`, async context => {
+for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restores local learning with an empty session store before external and webpage opens`, async context => {
   const platform = mode === 'safari' ? 'mac' : mode;
   const pending = timers(context);
   const h = browser([{ url: 'https://example.test/live', status: 'unloaded', discarded: true }]);
@@ -242,6 +242,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     emit(...args) { for (const fn of this.listeners) fn(...args); } });
   let release;
   let saved;
+  let accessLevel;
   const previousChrome = globalThis.chrome;
   globalThis.chrome = {
     runtime: { async getPlatformInfo() { return { os: platform }; }, getURL: value => (mode === 'safari' ? 'safari-web-extension://test/' : 'https://extension.test/') + value,
@@ -251,8 +252,9 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
         if (message.type === 'claim') return { type: 'receipt', result: 'accepted' };
         port.sent.push(message); return { type: 'receipt' };
       } },
-    storage: { session: { get: () => new Promise(resolve => { release = resolve; }),
-      async set(value) { saved = structuredClone(value); } } },
+    storage: { local: { async setAccessLevel(value) { accessLevel = value.accessLevel; },
+      get: () => new Promise(resolve => { release = resolve; }), async set(value) { saved = structuredClone(value); } },
+      session: { async get() { return {}; }, async set() { throw new Error('Session storage must not own learned links.'); } } },
     tabs: { ...h.api.tabs, onUpdated: event(), onRemoved: event(), onActivated: event(),
       sendMessage() { throw new Error('Sleeping tab content must not be contacted to match it.'); } },
     windows: { ...h.api.windows, onFocusChanged: event(), onRemoved: event() },
@@ -265,6 +267,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     if (mode === 'safari') { delete chrome.webNavigation.onHistoryStateUpdated; delete chrome.webNavigation.onReferenceFragmentUpdated; }
     await import('./extension/background.mjs?session-restore=' + mode);
     await new Promise(setImmediate);
+    assert.equal(accessLevel, 'TRUSTED_CONTEXTS');
     chrome.tabs.onUpdated.emit(1, { discarded: true, status: 'unloaded' });
     chrome.runtime.onStartup.emit();
     chrome.webNavigation.onCommitted.emit({ frameId: 0, tabId: 1, url: h.tabs[0].url, documentId: 'early' });

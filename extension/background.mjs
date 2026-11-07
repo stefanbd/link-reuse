@@ -11,13 +11,14 @@ const ready = Promise.all([
   chrome.runtime.getPlatformInfo(),
 ]).then(async ([policy, platform]) => {
   observer.maxSources = policy.maxRedirectSources;
-  const saved = await chrome.storage.session.get('learning');
+  await chrome.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' });
+  const saved = await chrome.storage.local.get('learning');
   const bridge = new BrowserBridge(policy, {
     platform: platform.os,
     connectPort,
     queryTabs: () => chrome.tabs.query({}),
     learningState: saved.learning,
-    saveLearning: learning => chrome.storage.session.set({ learning }),
+    saveLearning: learning => chrome.storage.local.set({ learning }),
     resetLearning: () => { observer.tabs.clear(); observer.pending.clear(); },
     badge: text => { void (chrome.action ?? chrome.browserAction).setBadgeText({ text }); },
     extensionVersion: chrome.runtime.getManifest().version,
@@ -88,7 +89,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type === 'canonical' && sender.tab && sender.frameId === 0) {
     void ready.then(({ bridge }) => {
       const tab = observer.tabs.get(sender.tab.id);
-      if (tab?.documentId === sender.documentId && tab.url === message.url) {
+      if (tab?.documentId === sender.documentId && sender.tab.url === message.url) {
+        if (tab.url !== message.url) bridge.observe(observer.history({ tabId: sender.tab.id, documentId: sender.documentId,
+          url: message.url }).map(alias => ({ kind: 'redirect', ...alias })));
         bridge.observe(observer.document({ tabId: sender.tab.id, documentId: sender.documentId, url: message.url,
           referrer: message.referrer }).map(alias => ({ kind: 'redirect', ...alias })));
         bridge.observe([{ kind: 'canonical', source: message.url, destination: canonicalDestination(message.url, message.hrefs) }]);

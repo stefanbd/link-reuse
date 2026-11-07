@@ -115,7 +115,7 @@ export class BrowserBridge {
     }).then(() => {
       this.storageError = '';
     }, error => {
-      this.storageError = 'Could not keep learned links for this browser session: ' + error.message;
+      this.storageError = 'Could not save learned links for open tabs: ' + error.message;
       throw error;
     });
     return this.saving;
