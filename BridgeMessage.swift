@@ -8,5 +8,7 @@ struct BridgeMessage: Codable, Sendable {
     var error: String? = nil
     var extensionVersion: String? = nil
     var profile: String? = nil
-    var requests: [BridgeMessage]? = nil
+    var endpoint: String? = nil
+    var token: String? = nil
+    var deadline: Double? = nil
 }

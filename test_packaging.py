@@ -14,7 +14,7 @@ class PackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             build.BUILD = pathlib.Path(temporary)
             try:
-                extension_id = build.prepare('group.example.LinkReuse')
+                extension_id = build.prepare()
                 self.assertEqual(extension_id, 'dkkfdmgdgomngkkoaaolokhechagdlfl')
                 chromium = build.BUILD / 'app-resources/extension'
                 safari = build.BUILD / 'safari-resources'
@@ -39,7 +39,12 @@ class PackagingTests(unittest.TestCase):
                 self.assertTrue(manifests[1]['background']['persistent'])
                 infos = [plistlib.loads((build.BUILD / (name + '-info.plist')).read_bytes()) for name in ['app', 'safari']]
                 self.assertEqual(infos[0]['CFBundleShortVersionString'], infos[1]['CFBundleShortVersionString'])
-                self.assertEqual(infos[0]['LinkReuseAppGroup'], infos[1]['LinkReuseAppGroup'])
+                for info in infos:
+                    self.assertNotIn('LinkReuseAppGroup', info)
+                    self.assertEqual(info['LSMinimumSystemVersion'], '26.0')
+                for name in ['app', 'safari']:
+                    entitlements = plistlib.loads((build.BUILD / (name + '.entitlements')).read_bytes())
+                    self.assertNotIn('com.apple.security.application-groups', entitlements)
                 self.assertTrue(infos[1]['CFBundleIdentifier'].startswith(infos[0]['CFBundleIdentifier'] + '.'))
             finally: build.BUILD = previous
 

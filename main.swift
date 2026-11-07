@@ -31,7 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.browser.bundleID) else { throw CocoaError(.fileNoSuchFile) }
                 _ = try await NSWorkspace.shared.openApplication(at: app, configuration: .init())
             }
-            if safari == nil { safari = try SafariBridge(directory: SafariIPC.directory()) }
+            if safari == nil { safari = try await SafariBridge(version: resources.extensionVersion) }
             _ = try await safari?.open(request.url.absoluteString)
             return
         }
@@ -96,7 +96,7 @@ func main() async throws {
         return
     }
     if CommandLine.arguments.contains("--safari-status") {
-        let state = try await SFSafariExtensionManager.stateOfSafariExtension(withIdentifier: SafariIPC.extensionIdentifier)
+        let state = try await SFSafariExtensionManager.stateOfSafariExtension(withIdentifier: SafariBridge.extensionIdentifier)
         print(state.isEnabled ? "Safari extension is enabled." : "Safari extension is installed but not enabled.")
         return
     }

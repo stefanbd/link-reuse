@@ -77,6 +77,7 @@ internal sealed class NativeHost
         using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token))
         {
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            var deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 10000;
             string? id = null;
             try
             {
@@ -85,7 +86,7 @@ internal sealed class NativeHost
                 id = Guid.NewGuid().ToString("N");
                 var waiting = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
                 pending[id] = waiting;
-                await Send(new Message("open", id, request.Url));
+                await Send(new Message("open", id, request.Url, Deadline: deadline));
                 var response = await waiting.Task.WaitAsync(timeout.Token);
                 await Wire.Write(pipe, response, timeout.Token);
             }

@@ -23,7 +23,7 @@ actor BridgeExchange {
         }
         defer { timer.cancel() }
         return try await withCheckedThrowingContinuation { continuation in
-            let message = BridgeMessage(type: "open", id: id, url: url)
+            let message = BridgeMessage(type: "open", id: id, url: url, deadline: Date().timeIntervalSince1970 * 1000 + 10_000)
             pending[id] = Pending(continuation: continuation, message: message)
             Task {
                 do { try await send(message) }
@@ -53,5 +53,9 @@ actor BridgeExchange {
     func finish() {
         for request in pending.values { request.continuation.resume(throwing: POSIXError(.EPIPE)) }
         pending.removeAll()
+    }
+
+    func finish(profile: String) {
+        for (id, request) in pending where request.profile == profile { fail(id, error: POSIXError(.EPIPE)) }
     }
 }

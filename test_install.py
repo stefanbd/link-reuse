@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 import install
 
@@ -21,6 +22,7 @@ class InstallTests(unittest.TestCase):
             def run(*args):
                 calls.append(tuple(map(str, args)))
                 if failing and failing(*args): raise subprocess.CalledProcessError(1, args)
+                if str(args[0]) == 'ditto': subprocess.run(list(map(str, args)), check=True)
             with patch.object(install, 'APP', destination), patch.object(install, 'BACKUPS', root / 'Backups'), \
                  patch.object(install, 'stop_owned_processes') as stop, patch.object(install, 'run', side_effect=run), \
                  patch.object(sys, 'argv', ['install.py', '--app', str(source)]):
@@ -30,7 +32,10 @@ class InstallTests(unittest.TestCase):
                 else:
                     install.main()
                     self.assertEqual((destination / 'version').read_text(), 'new')
-                    self.assertEqual(next((root / 'Backups').glob('*/Link Reuse.app/version')).read_text(), 'old')
+                    archive = next((root / 'Backups').glob('*/Link Reuse.zip'))
+                    with zipfile.ZipFile(archive) as saved:
+                        self.assertEqual(saved.read('Link Reuse.app/version'), b'old')
+                    self.assertEqual(list((root / 'Backups').glob('*/*.app')), [])
                 self.assertEqual(list(destination.parent.glob('.Link Reuse update*')), [])
                 return calls, stop.call_count
 

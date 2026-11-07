@@ -14,7 +14,7 @@ BUILD = ROOT / 'build'
 APP = BUILD / 'Link Reuse.app'
 
 
-def prepare(group):
+def prepare():
     BUILD.mkdir(exist_ok=True)
     manifest = json.loads((ROOT / 'extension/manifest.json').read_text())
     digest = hashlib.sha256(base64.b64decode(manifest['key'], validate=True)).hexdigest()[:32]
@@ -36,7 +36,7 @@ def prepare(group):
             safari_manifest['browser_action'] = safari_manifest.pop('action')
             safari_manifest['permissions'] = manifest['permissions'] + safari_manifest.pop('host_permissions')
             safari_manifest['background'] = {'page': 'background.html', 'persistent': True}
-            safari_manifest['content_security_policy'] = "script-src 'self'; object-src 'none'"
+            safari_manifest['content_security_policy'] = "script-src 'self'; object-src 'none'; connect-src 'self' ws://127.0.0.1:*"
             safari_manifest['browser_specific_settings'] = {'safari': {'strict_min_version': '18.4'}}
             (resources / 'manifest.json').write_text(json.dumps(safari_manifest, indent=2) + '\n')
         info = {
@@ -45,7 +45,7 @@ def prepare(group):
             'CFBundleExecutable': 'LinkReuseSafari' if name == 'safari' else 'LinkReuse',
             'CFBundlePackageType': 'XPC!' if name == 'safari' else 'APPL',
             'CFBundleVersion': manifest['version'], 'CFBundleShortVersionString': manifest['version'],
-            'LSMinimumSystemVersion': '14.0', 'LinkReuseAppGroup': group,
+            'LSMinimumSystemVersion': '26.0',
         }
         if name == 'app':
             info['LSUIElement'] = True
@@ -55,8 +55,7 @@ def prepare(group):
                                   'NSExtensionPrincipalClass': 'LinkReuseSafari.SafariWebExtensionHandler'}
             info['NSHumanReadableCopyright'] = 'Link Reuse'
         (BUILD / (name + '-info.plist')).write_bytes(plistlib.dumps(info))
-        entitlements = {'com.apple.security.application-groups': [group]}
-        if name == 'safari': entitlements.update({'com.apple.security.app-sandbox': True, 'com.apple.security.network.client': True})
+        entitlements = {'com.apple.security.app-sandbox': True, 'com.apple.security.network.client': True} if name == 'safari' else {}
         (BUILD / (name + '.entitlements')).write_bytes(plistlib.dumps(entitlements))
     return extension_id
 
@@ -64,11 +63,8 @@ def prepare(group):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sign', default='-', help='Code-signing identity; defaults to ad-hoc development signing.')
-    parser.add_argument('--team', help='Apple team identifier for the shared Mac app group.')
     args = parser.parse_args()
-    if args.sign != '-' and not args.team: parser.error('--team is required with --sign')
-    group = args.team + '.me.dichev.LinkReuse' if args.team else 'group.me.dichev.LinkReuse'
-    extension_id = prepare(group)
+    extension_id = prepare()
     for product in [APP, BUILD / 'LinkReuseSafari.appex']:
         if product.exists(): shutil.rmtree(product)
     subprocess.run(['xcodebuild', '-project', str(ROOT / 'LinkReuse.xcodeproj'), '-scheme', 'Link Reuse',

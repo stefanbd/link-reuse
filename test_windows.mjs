@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { LiveLearning, routeToTab } from './extension/matching.mjs';
 import { BrowserBridge as WindowsBridge } from './extension/browser-bridge.mjs';
 import { urlRules } from './extension/url-rules.mjs';
+import { safariTransport } from './test_safari_support.mjs';
 
 const policy = JSON.parse(readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
 const place = 'https://www.google.com/maps/place/Restaurant/@42,23,17z/data=!4m6!3m5!1s0x40aa8541e3d5da63:0x5353ef1753a6f43c!8m2!3d42';
@@ -244,9 +245,12 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
   let saved;
   let accessLevel;
   const previousChrome = globalThis.chrome;
+  const previousSocket = globalThis.WebSocket;
+  const safari = mode === 'safari' ? safariTransport() : null;
+  if (safari) globalThis.WebSocket = safari.Socket;
   globalThis.chrome = {
     runtime: { async getPlatformInfo() { return { os: platform }; }, getURL: value => (mode === 'safari' ? 'safari-web-extension://test/' : 'https://extension.test/') + value,
-      getManifest: () => ({ version: '3.1.3' }), connectNative: () => port, onStartup: event(), onMessage: event(),
+      getManifest: () => ({ version: '3.2.4' }), connectNative: () => safari ? safari.api.runtime.connectNative() : port, onStartup: event(), onMessage: event(),
       async sendNativeMessage(_application, message) {
         if (message.type === 'hello') return { type: 'ready' };
         if (message.type === 'claim') return { type: 'receipt', result: 'accepted' };
@@ -279,9 +283,9 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
     await new Promise(setImmediate);
     const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short' };
-    port.emit(mode === 'safari' ? { name: 'link-reuse', userInfo: request } : request);
+    if (safari) safari.emit(request); else port.emit(request);
     await new Promise(setImmediate);
-    assert.deepEqual(port.sent.find(message => message.id === 'first-after-idle'),
+    assert.deepEqual((safari?.sent ?? port.sent).find(message => message.id === 'first-after-idle'),
       { type: 'result', id: 'first-after-idle', result: 'focused' });
     assert.equal(h.tabs.length, 1);
     assert.equal(saved.learning.length, 2);
@@ -297,6 +301,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     await new Promise(setImmediate);
     assert.deepEqual(saved.learning, []);
   } finally {
+    globalThis.WebSocket = previousSocket;
     if (previousChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = previousChrome;
   }
@@ -316,6 +321,35 @@ test('repeated opens of the selected visible tab complete without redundant acti
   clearTimeout(bridge.timer);
   for (let i = 0; i < 3; i++) assert.deepEqual(await bridge.open(place), { result: 'focused' });
   assert.deepEqual(h.calls, []);
+  assert.equal(h.tabs.length, 1);
+  clearTimeout(bridge.timer);
+});
+
+test('expired external requests cannot focus or create a tab', async () => {
+  for (const tabs of [[], [{ url: 'https://example.test/item', active: false }]]) {
+    const h = browser(tabs);
+    await assert.rejects(routeToTab('https://example.test/item', new LiveLearning(policy), h.api, new Map(),
+      { deadline: Date.now() - 1 }), /expired/);
+    assert.deepEqual(h.calls, []);
+  }
+});
+
+test('an external request that expires behind another open is rejected at the mutation boundary', async context => {
+  let now = 1000;
+  context.mock.method(Date, 'now', () => now);
+  const h = browser([]), original = h.api.windows.getAll;
+  let release;
+  h.api.windows.getAll = () => new Promise(resolve => { release = resolve; });
+  const { bridge } = sessionBridge(h, learningSession());
+  clearTimeout(bridge.timer);
+  const first = bridge.open('https://example.test/first');
+  await new Promise(setImmediate);
+  h.api.windows.getAll = original;
+  const expired = assert.rejects(bridge.open('https://example.test/second', { deadline: 1001 }), /expired/);
+  now = 2000;
+  release(await original());
+  assert.deepEqual(await first, { result: 'opened' });
+  await expired;
   assert.equal(h.tabs.length, 1);
   clearTimeout(bridge.timer);
 });

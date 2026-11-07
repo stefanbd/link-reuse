@@ -60,7 +60,7 @@ export class BrowserBridge {
         }
         if (message.type === 'open' && typeof message.id === 'string') {
           if (!this.connected) { port.postMessage({ type: 'result', id: message.id, error: this.lastError || 'The extension is still connecting.' }); return; }
-          void this.open(message.url, {}, port).then(result => {
+          void this.open(message.url, { deadline: message.deadline }, port).then(result => {
             if (this.port === port) port.postMessage({ type: 'result', id: message.id, ...result });
           }, error => {
             if (this.port === port) port.postMessage({ type: 'result', id: message.id, error: error.message });
@@ -137,7 +137,8 @@ export class BrowserBridge {
     const tabs = await this.queryTabs();
     this.learning.prune(tabs);
     await this.persist().catch(() => {});
-    return { connected: !!this.connected, lastError: this.lastError || this.storageError, pending: this.pending, maxBytes: this.policy.maxCacheBytes,
+    return { connected: !!this.connected, transportConnected: this.port?.transportConnected ?? !!this.connected,
+      lastError: this.lastError || this.storageError, pending: this.pending, maxBytes: this.policy.maxCacheBytes,
       stats: { records: this.learning.records.size, bytes: this.learning.bytes } };
   }
 }

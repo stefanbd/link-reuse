@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import time
+import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent
 APP = pathlib.Path.home() / 'Applications/Link Reuse.app'
@@ -58,6 +59,12 @@ def main():
             run(REGISTER, '-f', APP)
             run('pluginkit', '-a', APP / 'Contents/PlugIns/LinkReuseSafari.appex')
             run('codesign', '--verify', '--deep', '--strict', APP)
+            if old.exists():
+                archive = backup / 'Link Reuse.zip'
+                run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', old, archive)
+                with zipfile.ZipFile(archive) as saved:
+                    if saved.testzip() is not None: raise RuntimeError('The rollback archive is damaged.')
+                shutil.rmtree(old)
         except BaseException:
             backup.mkdir(parents=True, exist_ok=True)
             if APP.exists(): APP.rename(backup / 'Failed update.app')
@@ -71,7 +78,7 @@ def main():
     shortcut = APP.parent / 'Link Reuse Extension'
     if not shortcut.exists() and not shortcut.is_symlink(): shortcut.symlink_to(APP / 'Contents/Resources/extension', target_is_directory=True)
     print('Installed:', APP)
-    if old.exists(): print('Rollback copy:', old)
+    if backup.exists(): print('Rollback copy:', backup / 'Link Reuse.zip')
     print('Enable Link Reuse in Safari Settings → Extensions. Reload it in Chromium browsers.')
 
 

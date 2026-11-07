@@ -1,37 +1,72 @@
-import AppKit
+import Foundation
 import SafariServices
+import Network
+import CryptoKit
 import OSLog
-import Darwin
 
-@MainActor
-final class SafariBridge {
-    private let descriptor: Int32
-    private let path: URL
-    private let exchange: BridgeExchange
+actor SafariBridge {
+    static let extensionIdentifier = "me.dichev.LinkReuse.Safari"
+    private static let authenticationData = Data("Link Reuse Safari connection".utf8)
 
-    init(directory: URL, deliver: @escaping @Sendable (BridgeMessage) async throws -> Void = { try await SafariBridge.dispatch($0) }) throws {
-        path = directory.appending(path: "r.sock")
-        if FileManager.default.fileExists(atPath: path.path) {
-            do {
-                let existing = try MacBridge.descriptor(path: path, listen: false)
-                close(existing)
-                throw POSIXError(.EBUSY)
-            } catch let error as POSIXError where error.code == .ECONNREFUSED || error.code == .ENOENT {
-                try FileManager.default.removeItem(at: path)
-            }
-        }
-        descriptor = try MacBridge.descriptor(path: path, listen: true)
-        let exchange = BridgeExchange(deliver: deliver)
-        self.exchange = exchange
-        let server = descriptor
-        let listener = Thread { Self.serve(server, exchange: exchange) }
-        listener.start()
+    private struct Client {
+        let connection: NetworkConnection<WebSocket>
+        var authenticated = false
+        var activity: UInt64 = 0
     }
 
-    deinit {
-        _ = shutdown(descriptor, SHUT_RDWR)
-        close(descriptor)
-        try? FileManager.default.removeItem(at: path)
+    private let listener: NetworkListener<WebSocket>
+    private let key = SymmetricKey(size: .bits256)
+    private let version: String
+    private let wake: @Sendable (BridgeMessage) async throws -> Void
+    private var endpoint = ""
+    private var serving: Task<Void, Never>?
+    private var clients: [String: Client] = [:]
+    private var activity: UInt64 = 0
+    private lazy var exchange = BridgeExchange { [weak self] message in
+        guard let self else { throw POSIXError(.EPIPE) }
+        try await self.deliver(message)
+    }
+
+    init(version: String, wake: @escaping @Sendable (BridgeMessage) async throws -> Void = SafariBridge.dispatch) async throws {
+        self.version = version
+        self.wake = wake
+        let parameters = NWParametersBuilder.parameters {
+            WebSocket { TCP() }.maximumMessageSize(1_048_576).autoReplyPing(true).subprotocols(["link-reuse"])
+        }
+        parameters.parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        parameters.parameters.acceptLocalOnly = true
+        let listener = try NetworkListener(using: parameters)
+        self.listener = listener
+        let (ready, continuation) = AsyncThrowingStream<UInt16, Error>.makeStream()
+        listener.onStateUpdate { listener, state in
+            switch state {
+            case .ready:
+                if let port = listener.port { continuation.yield(port.rawValue); continuation.finish() }
+            case .failed(let error): continuation.finish(throwing: error)
+            case .cancelled: continuation.finish(throwing: CancellationError())
+            default: break
+            }
+        }
+        serving = Task { [weak self, listener] in
+            do { try await listener.run { [weak self] connection in await self?.accept(connection) } }
+            catch { await self?.finish() }
+        }
+        var iterator = ready.makeAsyncIterator()
+        guard let port = try await iterator.next() else { throw POSIXError(.EIO) }
+        endpoint = "ws://127.0.0.1:\(port)/"
+    }
+
+    deinit { serving?.cancel() }
+
+    func stop() async {
+        serving?.cancel()
+        serving = nil
+        await finish()
+    }
+
+    private func finish() async {
+        clients.removeAll()
+        await exchange.finish()
     }
 
     func open(_ url: String) async throws -> String {
@@ -47,42 +82,77 @@ final class SafariBridge {
         return result
     }
 
-    private static func dispatch(_ message: BridgeMessage) async throws {
-        let data = try JSONEncoder().encode(message)
-        let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: dispatch")
-        try await SFSafariApplication.dispatchMessage(withName: "link-reuse", toExtensionWithIdentifier: SafariIPC.extensionIdentifier, userInfo: payload)
+    private func deliver(_ message: BridgeMessage) async throws {
+        if let (profile, client) = clients.filter({ $0.value.authenticated }).max(by: { $0.value.activity < $1.value.activity }), let id = message.id {
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: channel")
+            if await exchange.claim(id, profile: profile) { try await send(message, to: client.connection) }
+        } else {
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: bootstrap")
+            let token = Data(HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)).base64EncodedString()
+            try await wake(BridgeMessage(type: "connect", endpoint: endpoint, token: token))
+        }
     }
 
-    nonisolated private static func serve(_ server: Int32, exchange: BridgeExchange) {
-        while true {
-            let client = accept(server, nil, nil)
-            guard client >= 0 else { return }
-            MacBridge.configure(client)
-            let stream = FileHandle(fileDescriptor: client, closeOnDealloc: true)
-            do {
-                var uid: uid_t = 0
-                var gid: gid_t = 0
-                guard getpeereid(client, &uid, &gid) == 0, uid == getuid(),
-                      let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EPERM) }
-                let message = try JSONDecoder().decode(BridgeMessage.self, from: data)
-                guard SafariIPC.validate(message) else { throw POSIXError(.EINVAL) }
-                Task {
-                    if message.type == "pending" {
-                        let reply = BridgeMessage(type: "pending", requests: await exchange.unclaimed())
-                        try? Wire.writeFrame(JSONEncoder().encode(reply), to: stream)
-                        try? stream.close()
-                        return
-                    }
-                    let accepted: Bool
-                    if message.type == "claim", let id = message.id, let profile = message.profile {
-                        accepted = await exchange.claim(id, profile: profile)
-                    } else { accepted = await exchange.receive(message) }
-                    let reply = BridgeMessage(type: "receipt", id: message.id, result: accepted ? "accepted" : "ignored")
-                    try? Wire.writeFrame(JSONEncoder().encode(reply), to: stream)
-                    try? stream.close()
+    private func accept(_ connection: NetworkConnection<WebSocket>) async {
+        guard clients.count < 16 else { return }
+        let identity = UUID().uuidString
+        clients[identity] = Client(connection: connection)
+        await serve(connection, identity: identity)
+    }
+
+    private func serve(_ connection: NetworkConnection<WebSocket>, identity: String) async {
+        do {
+            let hello = try await withThrowingTaskGroup(of: BridgeMessage.self) { group in
+                group.addTask { try await Self.read(connection) }
+                group.addTask { try await Task.sleep(for: .seconds(5)); throw POSIXError(.ETIMEDOUT) }
+                defer { group.cancelAll() }
+                guard let value = try await group.next() else { throw POSIXError(.EIO) }
+                return value
+            }
+            guard hello.type == "hello", clients[identity] != nil,
+                  let token = hello.token, let code = Data(base64Encoded: token),
+                  HMAC<SHA256>.isValidAuthenticationCode(code, authenticating: Self.authenticationData, using: key) else { throw POSIXError(.EPERM) }
+            if hello.result == "active" { activity += 1 }
+            clients[identity]?.authenticated = true
+            clients[identity]?.activity = hello.result == "active" ? activity : 0
+            try await send(BridgeMessage(type: "ready", extensionVersion: version, profile: identity), to: connection)
+            for request in await exchange.unclaimed() {
+                if let id = request.id, await exchange.claim(id, profile: identity) { try await send(request, to: connection) }
+            }
+            while true {
+                var message = try await Self.read(connection)
+                switch message.type {
+                case "activity":
+                    activity += 1
+                    clients[identity]?.activity = activity
+                case "result":
+                    guard let id = message.id, UUID(uuidString: id) != nil,
+                          ["focused", "opened"].contains(message.result ?? "") || message.error != nil else { throw POSIXError(.EINVAL) }
+                    message.profile = identity
+                    _ = await exchange.receive(message)
+                default: throw POSIXError(.EINVAL)
                 }
-            } catch { try? stream.close() }
-        }
+            }
+        } catch {}
+        clients.removeValue(forKey: identity)
+        await exchange.finish(profile: identity)
+        if connection.state == .ready { try? await connection.close() }
+    }
+
+    private static func read(_ connection: NetworkConnection<WebSocket>) async throws -> BridgeMessage {
+        let frame = try await connection.receive()
+        guard frame.metadata.opcode == .text, frame.metadata.isComplete, frame.content.count <= 1_048_576 else { throw POSIXError(.EINVAL) }
+        return try JSONDecoder().decode(BridgeMessage.self, from: frame.content)
+    }
+
+    private func send(_ message: BridgeMessage, to connection: NetworkConnection<WebSocket>) async throws {
+        let data = try JSONEncoder().encode(message)
+        guard let text = String(data: data, encoding: .utf8) else { throw POSIXError(.EINVAL) }
+        try await connection.send(text)
+    }
+
+    @MainActor private static func dispatch(_ message: BridgeMessage) async throws {
+        let payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(message)) as? [String: Any]
+        try await SFSafariApplication.dispatchMessage(withName: "link-reuse", toExtensionWithIdentifier: extensionIdentifier, userInfo: payload)
     }
 }
