@@ -2,7 +2,7 @@ name: macOS package
 on:
   workflow_dispatch:
   push:
-    paths: ['*.swift', '*.py', 'extension/**', 'browsers.json', '*-vectors.json', 'test_*.mjs', '.github/workflows/macos.yml']
+    paths: ['*.swift', '*.py', 'LinkReuse.xcodeproj/**', 'extension/**', 'browsers.json', '*-vectors.json', 'test_*.mjs', '.github/workflows/macos.yml']
 permissions:
   contents: read
 jobs:
@@ -19,8 +19,8 @@ jobs:
         run: python3 build.py
       - name: Package
         run: |
-          ditto -c -k --sequesterRsrc --keepParent 'build/Link Reuse.app' build/link-reuse-macos-3.1.6.zip
-          shasum -a 256 build/link-reuse-macos-3.1.6.zip > build/link-reuse-macos-3.1.6.zip.sha256
+          ditto -c -k --sequesterRsrc --keepParent 'build/Link Reuse.app' build/link-reuse-macos-3.2.0.zip
+          shasum -a 256 build/link-reuse-macos-3.2.0.zip > build/link-reuse-macos-3.2.0.zip.sha256
       - uses: actions/upload-artifact@v7
         with:
           name: link-reuse-macos

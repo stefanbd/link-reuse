@@ -1,14 +1,6 @@
 import Foundation
 import Darwin
 
-struct BridgeMessage: Codable, Sendable {
-    var type: String
-    var id: String? = nil
-    var url: String? = nil
-    var result: String? = nil
-    var error: String? = nil
-    var extensionVersion: String? = nil
-}
 
 struct BridgeSession: Codable, Sendable {
     let id: String
@@ -107,8 +99,8 @@ enum MacBridge {
         let socket = try descriptor(path: session.socket, listen: false)
         let stream = FileHandle(fileDescriptor: socket, closeOnDealloc: true)
         defer { try? stream.close() }
-        try NativeHost.writeFrame(JSONEncoder().encode(BridgeMessage(type: "open", url: url)), to: stream)
-        guard let data = try NativeHost.readFrame(from: stream) else { throw POSIXError(.EIO) }
+        try Wire.writeFrame(JSONEncoder().encode(BridgeMessage(type: "open", url: url)), to: stream)
+        guard let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EIO) }
         let reply = try JSONDecoder().decode(BridgeMessage.self, from: data)
         if let error = reply.error { throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error]) }
         guard reply.type == "result", let result = reply.result, ["focused", "opened"].contains(result) else { throw POSIXError(.EINVAL) }

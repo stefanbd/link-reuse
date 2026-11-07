@@ -4,7 +4,7 @@
     if (!document.head) return;
     const canonical = [...document.head.querySelectorAll('link[rel~="canonical" i]')].slice(0, 2).map(link => link.href);
     const message = {
-      type: 'canonical', url: location.href,
+      type: 'canonical', url: location.href, referrer: document.referrer,
       hrefs: canonical.length ? canonical : [...document.head.querySelectorAll('meta[property="og:url" i]')].slice(0, 2).map(meta => meta.content),
     };
     const key = JSON.stringify(message);

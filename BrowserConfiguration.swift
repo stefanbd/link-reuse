@@ -5,7 +5,7 @@ struct BrowserConfiguration: Codable, Equatable, Sendable {
     let name: String
     let bundleID: String
     let appPath: String
-    let profilePath: String
+    let profilePath: String?
 }
 
 struct AppResources {
@@ -39,7 +39,8 @@ struct AppResources {
 
     func installNativeMessaging() throws {
         for browser in browsers {
-            let folder = URL.applicationSupportDirectory.appending(path: browser.profilePath).appending(path: "NativeMessagingHosts")
+            guard let profilePath = browser.profilePath else { continue }
+            let folder = URL.applicationSupportDirectory.appending(path: profilePath).appending(path: "NativeMessagingHosts")
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let file = folder.appending(path: "me.dichev.link_reuse.json")
             let manifest = ["name": "me.dichev.link_reuse", "description": "Route links through the shared Link Reuse extension.",

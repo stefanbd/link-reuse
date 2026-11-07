@@ -1,0 +1,163 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { connectNative } from './extension/native-port.mjs';
+import { RedirectObserver } from './extension/observer.mjs';
+
+function safari({ claim = 'accepted', fail = false } = {}) {
+  const callbacks = { message: [], disconnect: [] };
+  const sent = [];
+  let disconnected = 0;
+  const native = {
+    onMessage: { addListener: fn => callbacks.message.push(fn) },
+    onDisconnect: { addListener: fn => callbacks.disconnect.push(fn) },
+    disconnect() { disconnected++; for (const fn of callbacks.disconnect) fn(); },
+  };
+  const api = { runtime: {
+    getURL: () => 'safari-web-extension://example/', connectNative: () => native,
+    async sendNativeMessage(_name, message) {
+      sent.push(message);
+      if (fail) throw new Error('Native handler unavailable');
+      return message.type === 'hello' ? { type: 'ready', extensionVersion: '3.2.0' } : { type: 'receipt', result: claim };
+    },
+  } };
+  return { api, sent, get disconnected() { return disconnected; }, emit: message => callbacks.message.forEach(fn => fn(message)) };
+}
+
+test('Safari translates native messaging into the same ready/open/result contract', async () => {
+  const h = safari();
+  const port = connectNative(h.api);
+  const messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.0' }]);
+  const opening = { type: 'open', id: 'request', url: 'https://example.test/item' };
+  h.emit(opening);
+  await new Promise(setImmediate);
+  assert.deepEqual(h.sent[1], { type: 'claim', id: 'request' });
+  assert.equal(messages[1], opening);
+  port.postMessage({ type: 'result', id: 'request', result: 'focused' });
+  port.postMessage({ type: 'activity' });
+  await new Promise(setImmediate);
+  assert.deepEqual(h.sent[2], { type: 'result', id: 'request', result: 'focused' });
+  assert.equal(h.sent.length, 3);
+  port.disconnect();
+});
+
+test('an unselected Safari profile cannot route the same external request', async () => {
+  const h = safari({ claim: 'ignored' });
+  const port = connectNative(h.api);
+  const messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  h.emit({ type: 'open', id: 'request', url: 'https://example.test/item' });
+  h.emit({ type: 'wrong', id: 'request', url: 'https://example.test/item' });
+  await new Promise(setImmediate);
+  assert.deepEqual(messages, []);
+  assert.equal(h.sent.length, 1);
+  port.disconnect();
+});
+
+test('Safari native failures disconnect once and never manufacture an opening retry', async () => {
+  const h = safari({ fail: true });
+  const port = connectNative(h.api);
+  let disconnected = 0;
+  port.onDisconnect.addListener(() => disconnected++);
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  assert.equal(disconnected, 1);
+  assert.equal(h.disconnected, 1);
+  port.disconnect();
+  assert.equal(disconnected, 1);
+  assert.equal(h.sent.length, 1);
+});
+
+test('a late Safari claim cannot route after its native connection was closed', async () => {
+  const h = safari();
+  let release;
+  h.api.runtime.sendNativeMessage = () => new Promise(resolve => { release = resolve; });
+  const port = connectNative(h.api);
+  let opened = false;
+  port.onMessage.addListener(() => { opened = true; });
+  h.emit({ type: 'open', id: 'request', url: 'https://example.test/item' });
+  port.disconnect();
+  release({ result: 'accepted' });
+  await new Promise(setImmediate);
+  assert.equal(opened, false);
+});
+
+const event = (url, documentId, extra = {}) => ({ tabId: 1, url, documentId, ...extra });
+const a = 'https://example.test/source', b = 'https://example.test/item', c = 'https://example.test/view';
+
+test('browsers without redirect qualifiers use verified document referrers for automatic redirect chains', () => {
+  const observer = new RedirectObserver();
+  observer.before(event(a, 'one')); observer.committed(event(b, 'one'));
+  observer.before(event(c, 'two')); observer.committed(event(c, 'two'));
+  assert.deepEqual(observer.document(event(c, 'two', { referrer: b })), [
+    { source: a, destination: c }, { source: b, destination: c },
+  ]);
+});
+
+test('referrer learning rejects address-bar navigation, user clicks and stale documents', () => {
+  for (const kind of ['address-bar', 'click', 'stale']) {
+    const observer = new RedirectObserver();
+    observer.before(event(a, 'one')); observer.committed(event(b, 'one'));
+    if (kind === 'click') observer.interact(1, 'one');
+    observer.before(event(c, 'two')); observer.committed(event(c, 'two'));
+    assert.deepEqual(observer.document(event(c, kind === 'stale' ? 'one' : 'two', { referrer: kind === 'address-bar' ? '' : b })), []);
+  }
+});
+
+test('document handshake retains interaction even when there was no redirect', () => {
+  const observer = new RedirectObserver();
+  observer.committed(event(a, 'one'));
+  observer.document(event(a, 'one', { referrer: '', interacted: true }));
+  assert.deepEqual(observer.history(event(b, 'one')), []);
+});
+
+test('Safari URL updates learn same-document routes without Chromium history events', async context => {
+  const event = () => ({ callbacks: [], addListener(fn) { this.callbacks.push(fn); }, emit(...args) { for (const fn of this.callbacks) fn(...args); } });
+  const original = globalThis.chrome;
+  const raw = safari();
+  const tab = { id: 1, windowId: 1, url: a, status: 'complete', incognito: false };
+  let frame = { url: a, documentId: 'current' };
+  const focused = [];
+  const scheduled = new Map();
+  let sequence = 0;
+  context.mock.method(globalThis, 'setTimeout', (fn, delay) => { const id = ++sequence; scheduled.set(id, { fn, delay }); return id; });
+  context.mock.method(globalThis, 'clearTimeout', id => scheduled.delete(id));
+  globalThis.chrome = {
+    runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.0' }), onMessage: event(), onStartup: event() },
+    storage: { session: { async get() { return {}; }, async set() {} } },
+    tabs: { async query() { return [{ ...tab }]; }, async get() { return { ...tab }; },
+      async update(id) { focused.push(id); }, async create() { throw Error('Unexpected duplicate'); },
+      async sendMessage() { return { url: tab.url, referrer: '', interacted: false }; },
+      onUpdated: event(), onRemoved: event(), onActivated: event() },
+    windows: { async getAll() { return [{ id: 1, focused: true }]; }, async getLastFocused() { return { id: 1 }; }, async update() {}, onFocusChanged: event(), onRemoved: event() },
+    webNavigation: { onBeforeNavigate: event(), onCommitted: event(), onErrorOccurred: event(), async getFrame() { return { ...frame }; } },
+    action: { async setBadgeText() {} },
+  };
+  const policy = JSON.parse((await import('node:fs')).readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
+  context.mock.method(globalThis, 'fetch', async () => ({ async json() { return policy; } }));
+  try {
+    await import('./extension/background.mjs?safari-history');
+    await new Promise(setImmediate);
+    for (const [id, timer] of [...scheduled]) if (timer.delay === 50) { scheduled.delete(id); timer.fn(); }
+    await new Promise(setImmediate);
+    chrome.webNavigation.onCommitted.emit({ tabId: 1, frameId: 0, url: a, documentId: 'current' });
+    await new Promise(setImmediate);
+    tab.url = b; frame = { url: b, documentId: 'current' };
+    chrome.tabs.onUpdated.emit(1, { url: b });
+    await new Promise(setImmediate);
+    await new Promise(setImmediate);
+    raw.emit({ type: 'open', id: 'open', url: a });
+    await new Promise(setImmediate);
+    await new Promise(setImmediate);
+    assert.deepEqual(focused, [1]);
+    assert.deepEqual(raw.sent.find(message => message.type === 'result'), { type: 'result', id: 'open', result: 'focused' });
+    tab.url = c; frame = { url: c, documentId: 'new-document' };
+    chrome.tabs.onUpdated.emit(1, { url: c });
+    await new Promise(setImmediate);
+    const status = await new Promise(resolve => chrome.runtime.onMessage.emit({ type: 'status' }, {}, resolve));
+    assert.equal(status.stats.records, 0);
+  } finally { globalThis.chrome = original; }
+});

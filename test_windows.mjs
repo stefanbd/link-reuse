@@ -233,7 +233,8 @@ test('unchanged tab activity does not rewrite session learning', async context =
   assert.deepEqual(session.read(), []);
 });
 
-for (const platform of ['win', 'mac']) test(`the ${platform} background restores learning before external and webpage opens`, async context => {
+for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restores learning before external and webpage opens`, async context => {
+  const platform = mode === 'safari' ? 'mac' : mode;
   const pending = timers(context);
   const h = browser([{ url: 'https://example.test/live', status: 'unloaded', discarded: true }]);
   const port = nativePort();
@@ -243,8 +244,13 @@ for (const platform of ['win', 'mac']) test(`the ${platform} background restores
   let saved;
   const previousChrome = globalThis.chrome;
   globalThis.chrome = {
-    runtime: { async getPlatformInfo() { return { os: platform }; }, getURL: value => 'https://extension.test/' + value,
-      getManifest: () => ({ version: '3.1.3' }), connectNative: () => port, onStartup: event(), onMessage: event() },
+    runtime: { async getPlatformInfo() { return { os: platform }; }, getURL: value => (mode === 'safari' ? 'safari-web-extension://test/' : 'https://extension.test/') + value,
+      getManifest: () => ({ version: '3.1.3' }), connectNative: () => port, onStartup: event(), onMessage: event(),
+      async sendNativeMessage(_application, message) {
+        if (message.type === 'hello') return { type: 'ready' };
+        if (message.type === 'claim') return { type: 'receipt', result: 'accepted' };
+        port.sent.push(message); return { type: 'receipt' };
+      } },
     storage: { session: { get: () => new Promise(resolve => { release = resolve; }),
       async set(value) { saved = structuredClone(value); } } },
     tabs: { ...h.api.tabs, onUpdated: event(), onRemoved: event(), onActivated: event(),
@@ -256,7 +262,8 @@ for (const platform of ['win', 'mac']) test(`the ${platform} background restores
   };
   context.mock.method(globalThis, 'fetch', async () => ({ async json() { return policy; } }));
   try {
-    await import('./extension/background.mjs?session-restore=' + platform);
+    if (mode === 'safari') { delete chrome.webNavigation.onHistoryStateUpdated; delete chrome.webNavigation.onReferenceFragmentUpdated; }
+    await import('./extension/background.mjs?session-restore=' + mode);
     await new Promise(setImmediate);
     chrome.tabs.onUpdated.emit(1, { discarded: true, status: 'unloaded' });
     chrome.runtime.onStartup.emit();

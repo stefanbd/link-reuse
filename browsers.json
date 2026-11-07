@@ -33,5 +33,12 @@
     "bundleID": "com.microsoft.edgemac",
     "appPath": "/Applications/Microsoft Edge.app",
     "profilePath": "Microsoft Edge"
+  },
+  {
+    "id": "Safari",
+    "name": "Safari",
+    "bundleID": "com.apple.Safari",
+    "appPath": "/Applications/Safari.app",
+    "profilePath": null
   }
 ]

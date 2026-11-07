@@ -12,3 +12,6 @@ windows/**/obj/
 *.sqlite
 *.sqlite-*
 *.log
+
+xcuserdata/
+*.xcuserstate

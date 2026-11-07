@@ -1,10 +1,12 @@
 import AppKit
+import SafariServices
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let resources: AppResources
     private var pending: [OpenRequest] = []
     private var processing = false
+    private var safari: SafariBridge?
 
     init(resources: AppResources) { self.resources = resources }
 
@@ -22,6 +24,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func open(_ request: OpenRequest) async throws {
+        if request.browser.profilePath == nil {
+            if safari == nil { safari = try SafariBridge(directory: SafariIPC.directory()) }
+            _ = try await safari?.open(request.url.absoluteString)
+            NSRunningApplication.runningApplications(withBundleIdentifier: request.browser.bundleID).first?.activate()
+            return
+        }
         var sessions = try MacBridge.sessions(browser: request.browser.bundleID)
         if sessions.isEmpty {
             guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.browser.bundleID) else { throw CocoaError(.fileNoSuchFile) }
@@ -80,6 +88,11 @@ func main() async throws {
     if CommandLine.arguments.contains("--install") {
         try AppResources().installNativeMessaging()
         print("Registered the Link Reuse native bridge for supported browsers. Load the bundled extension in each browser profile.")
+        return
+    }
+    if CommandLine.arguments.contains("--safari-status") {
+        let state = try await SFSafariExtensionManager.stateOfSafariExtension(withIdentifier: SafariIPC.extensionIdentifier)
+        print(state.isEnabled ? "Safari extension is enabled." : "Safari extension is installed but not enabled.")
         return
     }
     let application = NSApplication.shared

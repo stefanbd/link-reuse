@@ -18,6 +18,7 @@ export class RedirectObserver {
       sources.add(previous.url);
     }
     const tab = { sources: [...sources].slice(-this.maxSources), url: event.url, documentId: event.documentId, interacted: false };
+    if (!event.transitionQualifiers && previous && !previous.interacted) tab.redirectFrom = { url: previous.url, sources: previous.sources };
     this.tabs.set(event.tabId, tab);
     this.pending.delete(event.tabId);
     return this.aliases(tab);
@@ -33,6 +34,17 @@ export class RedirectObserver {
     }
     tab.sources = [...new Set([...tab.sources, tab.url])].slice(-this.maxSources);
     tab.url = event.url;
+    return this.aliases(tab);
+  }
+
+  document(event) {
+    const tab = this.tabs.get(event.tabId);
+    if (!tab || tab.documentId !== event.documentId || tab.url !== event.url) return [];
+    const previous = tab.redirectFrom;
+    delete tab.redirectFrom;
+    tab.interacted ||= event.interacted === true;
+    if (!previous || event.referrer !== previous.url) return [];
+    tab.sources = [...new Set([...previous.sources, previous.url, ...tab.sources])].slice(-this.maxSources);
     return this.aliases(tab);
   }
 

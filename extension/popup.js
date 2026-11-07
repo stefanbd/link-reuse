@@ -3,7 +3,7 @@ const storageText = document.querySelector('#storage');
 const clear = document.querySelector('#clear');
 
 function show(status) {
-  statusText.textContent = status.connected && !status.lastError ? 'Tab reuse learning is connected.' : status.lastError || 'Recorder unavailable.';
+  statusText.textContent = status.connected && !status.lastError ? 'Tab reuse learning is connected.' : status.lastError || 'Native connection unavailable.';
   storageText.textContent = status.stats ? `${status.stats.records} learned links · ${(status.stats.bytes / 1024).toFixed(1)} KiB / ${status.maxBytes / 1048576} MiB` : '';
   clear.disabled = !status.connected;
 }

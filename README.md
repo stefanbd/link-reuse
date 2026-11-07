@@ -1,10 +1,10 @@
 # Link Reuse
 
-[Source and releases](https://github.com/stefanbd/link-reuse). Windows 0.1.6 and macOS 3.1.6 bundle extension 3.1.6.
+[Source and releases](https://github.com/stefanbd/link-reuse). Windows 0.1.7 and macOS 3.2.0 bundle extension 3.2.0.
 
 Link Reuse selects an existing matching tab before creating a new one. It preserves that tab's current page and deeper view. External links and webpage new-tab clicks use the **same extension matcher on Windows and macOS**. The native apps only deliver external links and activate the browser; they do not maintain separate matching rules.
 
-Supported Chromium browsers: Edge, Chrome and Brave on Windows; Arc, Chrome, Brave, Edge and Edge Beta on macOS. The extension must be loaded in every browser profile you want to use. Tab and window visibility is limited to what that browser exposes to its extension, including workspaces/spaces. Explicit external profile selection, Safari and Firefox are not implemented.
+Supported browsers: Edge, Chrome and Brave on Windows; Arc, Chrome, Brave, Edge and Edge Beta on macOS, plus Safari 18.4+ as a development preview. The extension must be loaded in every browser profile you want to use. Tab and window visibility is limited to what that browser exposes to its extension, including workspaces/spaces. Explicit external profile selection and Firefox are not implemented.
 
 ## Which clicks are handled
 
@@ -38,7 +38,7 @@ Learning remains in browser-session memory while matching normal tabs are open, 
 
 The same 16-request queue serves external and webpage opens. Session writes are coalesced and skipped when learning is unchanged, outside the opening result. Disconnect recovery makes four timed attempts and then waits for activity; there is no permanent polling. Accepted/uncertain requests are not retried through a second opening path.
 
-Windows uses current-user-only named pipes. macOS uses private Unix sockets and metadata under `/tmp/link-reuse-<uid>` (directory 0700, files/sockets 0600), verifies executable identity and process start time, and removes normal sessions on shutdown. Stale sessions are ignored/cleaned on access. Metadata contains process/browser identity and activity time, **no URLs or page content**. Each browser profile owns its native-messaging connection and helper process. Helpers block between events and exit when the browser connection closes. The routing app starts on demand; there is no login item, service, scheduled task or extra runtime.
+Windows uses current-user-only named pipes. Chromium on macOS uses private Unix sockets and metadata under `/tmp/link-reuse-<uid>` (directory 0700, files/sockets 0600), verifies executable identity and process start time, and removes normal sessions on shutdown. Stale sessions are ignored/cleaned on access. Metadata contains process/browser identity and activity time, **no URLs or page content**. Each Chromium browser profile owns its native-messaging connection and helper process. Safari uses its bundled native app extension and Apple messaging; a private app-group socket returns request claims and results to the routing app. A request can be claimed once, preventing duplicate opens if Safari delivers it to more than one extension instance. Safari follows Apple’s containing-app message delivery; explicit profile selection is not available. The app-group container holds no learned links or URL files. Helpers block between events and exit when the browser connection closes. The routing app starts on demand; there is no login item, service, scheduled task or extra runtime.
 
 ## Windows installation
 
@@ -61,17 +61,21 @@ From 0.1.2 onward, updates restart the staged helper and reload the extension. A
 
 ## macOS installation and update
 
-macOS 14+, universal Intel/Apple Silicon application. Download the macOS release, extract and place **Link Reuse.app** in `~/Applications` first, then register its native bridge:
+macOS 14+, universal Intel/Apple Silicon application with one embedded Safari Web Extension and the Chromium native host. Download the macOS release, extract and place **Link Reuse.app** in `~/Applications` first, then register its native bridge:
 
 ```sh
 ~/Applications/'Link Reuse.app'/Contents/MacOS/LinkReuse --install
 ```
 
-Load unpacked `~/Applications/Link Reuse.app/Contents/Resources/extension` in each browser profile, and open its popup to check the connection. The stable extension ID remains `dkkfdmgdgomngkkoaaolokhechagdlfl`. The release is ad-hoc signed, not Developer ID signed/notarized; macOS may require a manual first-open confirmation.
+For Chromium browsers, load unpacked `~/Applications/Link Reuse.app/Contents/Resources/extension` in each browser profile, and open its popup to check the connection. The stable extension ID remains `dkkfdmgdgomngkkoaaolokhechagdlfl`. The release is ad-hoc signed, not Developer ID signed/notarized; macOS may require a manual first-open confirmation.
 
-**Upgrading from the earlier Mac implementation:** turn off Link Reuse in the browser to stop the old recorder, quit the routing app, move the old app aside, install the new app, run `--install`, then reload/re-enable the bundled extension. Update app and extension together. The independent Swift matcher, Apple Events adapters, disk learning cache and recorder queue are no longer used. Full external reuse now requires the extension, just as on Windows. Browser Automation permission is no longer needed. Earlier on-disk learning files are not imported; newly learned data stays in session memory.
+**Upgrading from the earlier Mac implementation:** `python3 install.py` now stops only Link Reuse’s own processes, replaces the app, registers both browser connections and retains a rollback copy. Then reload/re-enable the bundled extension. For a downloaded release, `python3 install.py --app /path/to/Link\ Reuse.app` uses the same installer. Update app and extension together. The independent Swift matcher, Apple Events adapters, disk learning cache and recorder queue are no longer used. Full external reuse now requires the extension, just as on Windows. Browser Automation permission is no longer needed. Earlier on-disk learning files are not imported; newly learned data stays in session memory.
 
-OpenIn can remain your default router. Existing `linkreuse://open/<browser>?url=<encoded-original>` destinations and routing rules continue to work. Any router that can send this ordinary app URL can use it; there is no runtime OpenIn dependency. Existing `openin-rewrite.js` and the separately invoked `configure_openin.py --apply` support the previously tested OpenIn schema. Rebuilding/installing does not modify router rules.
+For Safari, open the installed app once, then enable **Link Reuse** in Safari Settings → Extensions and grant access to the websites where reuse is wanted. Local ad-hoc builds require Safari’s **Allow unsigned extensions** development setting, which resets after quitting Safari; macOS may also request access to the app’s own shared container. Development signing is available with `python3 build.py --sign <identity> --team <team-id>` when the signing key is accessible. A production distribution requires appropriate signing; this build is not notarized. `LinkReuse --safari-status` reports installation/enabled state without reading browser tabs.
+
+Safari supplies document IDs from 18.4 onward. Where it lacks Chromium history/transition events, URL-update events and document/referrer checks feed the same observer. Referrer-based redirect continuation is conservative: omitted or reduced referrers do not authorize inferred aliases.
+
+OpenIn can remain your default router. Existing `linkreuse://open/<browser>?url=<encoded-original>` destinations, including the new `Safari` browser ID, and routing rules continue to work. Any router that can send this ordinary app URL can use it; there is no runtime OpenIn dependency. Existing `openin-rewrite.js` and the separately invoked `configure_openin.py --apply` support the previously tested OpenIn schema. Rebuilding/installing does not modify router rules. External Safari links must pass through the app before Safari opens a tab; choosing Safari itself as the default destination does not provide pre-creation reuse.
 
 Build from source with Xcode command-line tools, Python and a current Node version:
 
@@ -80,6 +84,8 @@ python3 verify.py
 python3 build.py
 python3 install.py
 ```
+
+`build.py` prepares both extension manifests from the same source and builds the containing app and Safari target with `LinkReuse.xcodeproj`; it does not maintain a separate Safari matching implementation.
 
 Python/Node are development tools only. The installed app and helper are the same native Swift binary; the installed Windows binary is .NET Native AOT. No Python, Node or .NET runtime is needed by end users.
 

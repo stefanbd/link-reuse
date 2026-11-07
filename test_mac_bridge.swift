@@ -31,10 +31,10 @@ struct MacBridgeTests {
             MacBridge.configure(client)
             let stream = FileHandle(fileDescriptor: client, closeOnDealloc: true)
             defer { try? stream.close() }
-            guard let data = try NativeHost.readFrame(from: stream) else { throw POSIXError(.EIO) }
+            guard let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EIO) }
             let request = try JSONDecoder().decode(BridgeMessage.self, from: data)
             precondition(request.type == "open" && request.url == "https://example.test/item?x=one&y=two")
-            try NativeHost.writeFrame(JSONEncoder().encode(BridgeMessage(type: "result", result: "focused")), to: stream)
+            try Wire.writeFrame(JSONEncoder().encode(BridgeMessage(type: "result", result: "focused")), to: stream)
         }
         let response = try await Task.detached { try MacBridge.send("https://example.test/item?x=one&y=two", session: session) }.value
         precondition(response == "focused")
@@ -43,14 +43,14 @@ struct MacBridgeTests {
         precondition((socketAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
 
         let pipe = Pipe()
-        try NativeHost.writeFrame(Data("test".utf8), to: pipe.fileHandleForWriting)
+        try Wire.writeFrame(Data("test".utf8), to: pipe.fileHandleForWriting)
         try pipe.fileHandleForWriting.close()
-        check(try NativeHost.readFrame(from: pipe.fileHandleForReading) == Data("test".utf8))
-        check(try NativeHost.readFrame(from: pipe.fileHandleForReading) == nil)
+        check(try Wire.readFrame(from: pipe.fileHandleForReading) == Data("test".utf8))
+        check(try Wire.readFrame(from: pipe.fileHandleForReading) == nil)
         let oversized = Pipe()
         try oversized.fileHandleForWriting.write(contentsOf: Data([1, 0, 16, 0]))
         try oversized.fileHandleForWriting.close()
-        do { _ = try NativeHost.readFrame(from: oversized.fileHandleForReading); preconditionFailure("Oversized frame accepted") }
+        do { _ = try Wire.readFrame(from: oversized.fileHandleForReading); preconditionFailure("Oversized frame accepted") }
         catch let error as POSIXError { precondition(error.code == .EMSGSIZE) }
         precondition(!shouldExitRouter(busy: true, browserRunning: false))
         precondition(!shouldExitRouter(busy: false, browserRunning: true))

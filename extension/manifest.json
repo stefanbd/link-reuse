@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Link Reuse",
-  "version": "3.1.6",
+  "version": "3.2.0",
   "description": "Reuse existing tabs for web links using observed redirects and same-resource URLs stored locally.",
   "permissions": [
     "webNavigation",
@@ -26,8 +26,13 @@
       "run_at": "document_start"
     },
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["page-links.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "page-links.js"
+      ],
       "all_frames": true,
       "run_at": "document_start"
     }
@@ -36,5 +41,9 @@
     "default_popup": "popup.html"
   },
   "incognito": "not_allowed",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnYNZQQUlTRvleuaMQ66ecLdZU+P9tp0uu0UFQm8EK4lOqhAz3BkTrIyErJJFOGjVatejtW2Gy0v8CHhPnTzBd/CxJgS1O7aHARhgifzIUWCVHU8xhdp4GgKFfQD5d2tKUftqqg5x8EO5VZqxowaW6tdTGSbaHoZyoeKiJKnq3Ghx3qxWETPsOJHPcl2Z8a5TRciP42kSEjWlpXB9hR6IDvfEfwyoBIOs6mnQlW7EGLS6/TczHZJbAho0cy4IqWBL0y9objPQxrJASSsDHEEdISr+NP1NGjQTCAFROhkt1ULVF+Wngzp3S9NUYJRUT6cWBiO328wWwcY/7SfOOlSRCwIDAQAB"
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnYNZQQUlTRvleuaMQ66ecLdZU+P9tp0uu0UFQm8EK4lOqhAz3BkTrIyErJJFOGjVatejtW2Gy0v8CHhPnTzBd/CxJgS1O7aHARhgifzIUWCVHU8xhdp4GgKFfQD5d2tKUftqqg5x8EO5VZqxowaW6tdTGSbaHoZyoeKiJKnq3Ghx3qxWETPsOJHPcl2Z8a5TRciP42kSEjWlpXB9hR6IDvfEfwyoBIOs6mnQlW7EGLS6/TczHZJbAho0cy4IqWBL0y9objPQxrJASSsDHEEdISr+NP1NGjQTCAFROhkt1ULVF+Wngzp3S9NUYJRUT6cWBiO328wWwcY/7SfOOlSRCwIDAQAB",
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ]
 }
