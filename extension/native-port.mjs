@@ -19,7 +19,9 @@ export function connectNative(api) {
   const queued = [];
   let closed = false;
   let ready = false;
-  const trace = stage => { void api.runtime.sendNativeMessage('me.dichev.LinkReuse', { type: 'trace', result: stage }).catch(() => {}); };
+  function enqueue(request) {
+    if (request?.type === 'open' && typeof request.id === 'string' && typeof request.url === 'string' && queued.length < 16) queued.push(request);
+  }
   function flush() {
     if (closed || !ready || !messages.size) return;
     for (const message of queued.splice(0)) {
@@ -36,7 +38,6 @@ export function connectNative(api) {
       if (closed) return;
       closed = true;
       queued.length = 0;
-      trace('port-disconnected');
       incoming.disconnect();
       for (const listener of disconnects) listener();
     },
@@ -47,6 +48,7 @@ export function connectNative(api) {
         if (!closed && message.type === 'hello') {
           ready = true;
           for (const listener of messages) listener(reply);
+          for (const request of (reply.requests ?? []).slice(0, 16)) enqueue(request);
           flush();
         }
       }).catch(() => port.disconnect());
@@ -54,11 +56,9 @@ export function connectNative(api) {
   };
   incoming.onDisconnect.addListener(() => { void api.runtime.lastError; port.disconnect(); });
   incoming.onMessage.addListener(message => {
-    trace('native-message');
-    if (closed || message?.type !== 'open' || typeof message.id !== 'string' || typeof message.url !== 'string') return;
-    if (queued.length < 16) queued.push(message);
+    if (closed || message?.name !== 'link-reuse') return;
+    enqueue(message.userInfo);
     flush();
   });
-  trace('port-open');
   return port;
 }

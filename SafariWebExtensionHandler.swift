@@ -14,12 +14,12 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             case "hello":
                 let manifest = Bundle.main.resourceURL?.appending(path: "manifest.json")
                 guard let manifest, let version = (try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any])?["version"] as? String else { throw CocoaError(.fileReadCorruptFile) }
-                reply = BridgeMessage(type: "ready", extensionVersion: version, profile: message.profile)
+                var requests: [BridgeMessage] = []
+                do {
+                    requests = try SafariIPC.exchange(BridgeMessage(type: "pending", profile: message.profile), directory: SafariIPC.directory()).requests ?? []
+                } catch let error as POSIXError where error.code == .ENOENT || error.code == .ECONNREFUSED {}
+                reply = BridgeMessage(type: "ready", extensionVersion: version, profile: message.profile, requests: requests)
             case "activity": reply = BridgeMessage(type: "receipt")
-            case "trace":
-                guard let stage = message.result, ["port-open", "port-disconnected", "native-message"].contains(stage) else { throw CocoaError(.coderInvalidValue) }
-                Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: \(stage, privacy: .public)")
-                reply = BridgeMessage(type: "receipt")
             case "claim", "result":
                 guard SafariIPC.validate(message) else { throw CocoaError(.coderInvalidValue) }
                 Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: \(message.type, privacy: .public)")

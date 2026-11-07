@@ -28,8 +28,12 @@ struct SafariBridgeTests {
         let routing = Task { try await bridge?.open("https://example.test/item") }
         let message = await deliveries.next()
         guard let id = message.id else { preconditionFailure() }
+        let pending = try SafariIPC.exchange(BridgeMessage(type: "pending", profile: "default"), directory: directory)
+        precondition(pending.requests?.count == 1 && pending.requests?.first?.id == id && pending.requests?.first?.url == message.url)
         let claim = try SafariIPC.exchange(BridgeMessage(type: "claim", id: id, profile: "default"), directory: directory)
         precondition(claim.result == "accepted")
+        let claimed = try SafariIPC.exchange(BridgeMessage(type: "pending", profile: "default"), directory: directory)
+        precondition(claimed.requests?.isEmpty == true)
         let other = UUID().uuidString
         let duplicate = try SafariIPC.exchange(BridgeMessage(type: "claim", id: id, profile: other), directory: directory)
         precondition(duplicate.result == "ignored")
@@ -41,6 +45,8 @@ struct SafariBridgeTests {
         precondition(result == "focused")
         let late = try SafariIPC.exchange(BridgeMessage(type: "result", id: id, result: "focused", profile: "default"), directory: directory)
         precondition(late.result == "ignored")
+        let settled = try SafariIPC.exchange(BridgeMessage(type: "pending", profile: "default"), directory: directory)
+        precondition(settled.requests?.isEmpty == true)
         let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         precondition(files == ["r.sock"])
         let permissions = try FileManager.default.attributesOfItem(atPath: directory.appending(path: "r.sock").path)

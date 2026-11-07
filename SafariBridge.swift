@@ -35,9 +35,15 @@ final class SafariBridge {
     }
 
     func open(_ url: String) async throws -> String {
-        let reply = try await exchange.request(url)
+        let reply: BridgeMessage
+        do { reply = try await exchange.request(url) }
+        catch {
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").error("Safari transport: failed")
+            throw error
+        }
         if let error = reply.error { throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error]) }
         guard let result = reply.result, ["focused", "opened"].contains(result) else { throw POSIXError(.EINVAL) }
+        Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: completed \(result, privacy: .public)")
         return result
     }
 
@@ -62,6 +68,12 @@ final class SafariBridge {
                 let message = try JSONDecoder().decode(BridgeMessage.self, from: data)
                 guard SafariIPC.validate(message) else { throw POSIXError(.EINVAL) }
                 Task {
+                    if message.type == "pending" {
+                        let reply = BridgeMessage(type: "pending", requests: await exchange.unclaimed())
+                        try? Wire.writeFrame(JSONEncoder().encode(reply), to: stream)
+                        try? stream.close()
+                        return
+                    }
                     let accepted: Bool
                     if message.type == "claim", let id = message.id, let profile = message.profile {
                         accepted = await exchange.claim(id, profile: profile)

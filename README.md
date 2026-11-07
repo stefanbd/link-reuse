@@ -1,6 +1,6 @@
 # Link Reuse
 
-[Source and releases](https://github.com/stefanbd/link-reuse). Windows 0.1.8 and macOS 3.2.1 bundle extension 3.2.1.
+[Source and releases](https://github.com/stefanbd/link-reuse). Windows 0.1.8 and macOS 3.2.2 bundle extension 3.2.2.
 
 Link Reuse selects an existing matching tab before creating a new one. It preserves that tab's current page and deeper view. External links and webpage new-tab clicks use the **same extension matcher on Windows and macOS**. The native apps only deliver external links and activate the browser; they do not maintain separate matching rules.
 
@@ -73,7 +73,7 @@ For Chromium browsers, load unpacked `~/Applications/Link Reuse.app/Contents/Res
 
 For Safari, open the installed app once, then enable **Link Reuse** in Safari Settings → Extensions and grant access to the websites where reuse is wanted. Local ad-hoc builds require Safari’s **Allow unsigned extensions** development setting, which resets after quitting Safari; macOS may also request access to the app’s own shared container. Development signing is available with `python3 build.py --sign <identity> --team <team-id>` when the signing key is accessible. A production distribution requires appropriate signing; this build is not notarized. `LinkReuse --safari-status` reports installation/enabled state without reading browser tabs.
 
-Safari uses a generated Manifest V2 package with a resident background page because incoming native-port messages cannot reliably wake an unloaded MV3 page. The port listener is installed before asynchronous policy/session startup, with at most 16 early deliveries awaiting readiness. Chromium keeps Manifest V3; the engine and policy files remain shared. Safari’s resident context blocks between browser events and adds no polling. Native transport stage/error logs contain no URLs, tokens or page content.
+Safari uses a generated Manifest V2 package with a resident background page because incoming native-port messages cannot reliably wake an unloaded MV3 page. The port listener is installed before asynchronous policy/session startup, with at most 16 early deliveries awaiting readiness. Its startup handshake also retrieves unclaimed requests from the app, covering delivery before the listener loads. Both paths use the same claim, so each request opens at most once. Chromium keeps Manifest V3; the engine and policy files remain shared. Safari’s resident context blocks between browser events and adds no polling. Native transport stage/error logs contain no URLs, tokens or page content.
 
 Safari supplies document IDs from 18.4 onward. Where it lacks Chromium history/transition events, URL-update events and document/referrer checks feed the same observer. Referrer-based redirect continuation is conservative: omitted or reduced referrers do not authorize inferred aliases.
 

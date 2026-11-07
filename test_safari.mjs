@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { connectNative, prepareNative } from './extension/native-port.mjs';
 import { RedirectObserver } from './extension/observer.mjs';
 
-function safari({ claim = 'accepted', fail = false } = {}) {
+function safari({ claim = 'accepted', fail = false, pending } = {}) {
   const callbacks = { message: [], disconnect: [] };
   const sent = [];
   let disconnected = 0;
@@ -17,10 +17,12 @@ function safari({ claim = 'accepted', fail = false } = {}) {
     async sendNativeMessage(_name, message) {
       sent.push(message);
       if (fail) throw new Error('Native handler unavailable');
-      return message.type === 'hello' ? { type: 'ready', extensionVersion: '3.2.1' } : { type: 'receipt', result: claim };
+      return message.type === 'hello' ? { type: 'ready', extensionVersion: '3.2.2', ...(pending ? { requests: pending } : {}) } : { type: 'receipt', result: claim };
     },
   } };
-  return { api, get sent() { return sent.filter(message => message.type !== 'trace'); }, get disconnected() { return disconnected; }, emit: message => callbacks.message.forEach(fn => fn(message)) };
+  return { api, sent, get disconnected() { return disconnected; },
+    emit: message => callbacks.message.forEach(fn => fn({ name: 'link-reuse', userInfo: message })),
+    emitRaw: message => callbacks.message.forEach(fn => fn(message)) };
 }
 
 test('Safari translates native messaging into the same ready/open/result contract', async () => {
@@ -30,7 +32,7 @@ test('Safari translates native messaging into the same ready/open/result contrac
   port.onMessage.addListener(message => messages.push(message));
   port.postMessage({ type: 'hello' });
   await new Promise(setImmediate);
-  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.1' }]);
+  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.2' }]);
   const opening = { type: 'open', id: 'request', url: 'https://example.test/item' };
   h.emit(opening);
   await new Promise(setImmediate);
@@ -133,7 +135,7 @@ test('Safari URL updates learn same-document routes without Chromium history eve
   context.mock.method(globalThis, 'setTimeout', (fn, delay) => { const id = ++sequence; scheduled.set(id, { fn, delay }); return id; });
   context.mock.method(globalThis, 'clearTimeout', id => scheduled.delete(id));
   globalThis.chrome = {
-    runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.1' }), onMessage: event(), onStartup: event() },
+    runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.2' }), onMessage: event(), onStartup: event() },
     storage: { session: { async get() { return {}; }, async set() {} } },
     tabs: { async query() { return [{ ...tab }]; }, async get() { return { ...tab }; },
       async update(id) { focused.push(id); }, async create() { throw Error('Unexpected duplicate'); },
@@ -213,4 +215,35 @@ test('Chromium native connections remain lazy and reconnect with a fresh browser
   assert.equal(calls, 0);
   assert.notEqual(connect(), connect());
   assert.equal(calls, 2);
+});
+
+test('Safari accepts the observed named native envelope and rejects unrelated messages', async () => {
+  const h = safari();
+  const port = connectNative(h.api);
+  const messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  const frame = { type: 'open', id: 'request', url: 'https://example.test/item' };
+  for (const value of [frame, null, { name: 'other', userInfo: frame }, { name: 'link-reuse', userInfo: { ...frame, id: 1 } }]) h.emitRaw(value);
+  await new Promise(setImmediate);
+  assert.equal(h.sent.length, 1);
+  h.emitRaw({ name: 'link-reuse', userInfo: frame });
+  await new Promise(setImmediate);
+  assert.equal(messages[1], frame);
+  port.disconnect();
+});
+
+test('Safari retrieves an unclaimed request when dispatch preceded the native listener', async () => {
+  const frame = { type: 'open', id: 'cold', url: 'https://example.test/item' };
+  const h = safari({ pending: [frame] });
+  const port = connectNative(h.api);
+  const messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  assert.deepEqual(messages.map(message => message.type), ['ready', 'open']);
+  assert.equal(messages[1], frame);
+  assert.deepEqual(h.sent[1], { type: 'claim', id: 'cold' });
+  port.disconnect();
 });

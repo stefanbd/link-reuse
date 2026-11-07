@@ -26,8 +26,9 @@ enum SafariIPC {
     }
 
     static func validate(_ message: BridgeMessage) -> Bool {
-        guard let id = message.id, UUID(uuidString: id) != nil,
-              let profile = message.profile, profile == "default" || UUID(uuidString: profile) != nil else { return false }
+        guard let profile = message.profile, profile == "default" || UUID(uuidString: profile) != nil else { return false }
+        if message.type == "pending" { return true }
+        guard let id = message.id, UUID(uuidString: id) != nil else { return false }
         return message.type == "claim" || (message.type == "result" &&
             (["focused", "opened"].contains(message.result ?? "") || message.error != nil))
     }

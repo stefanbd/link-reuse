@@ -4,6 +4,7 @@ import Darwin
 actor BridgeExchange {
     private struct Pending {
         let continuation: CheckedContinuation<BridgeMessage, Error>
+        let message: BridgeMessage
         var profile: String?
     }
 
@@ -22,13 +23,16 @@ actor BridgeExchange {
         }
         defer { timer.cancel() }
         return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = Pending(continuation: continuation)
+            let message = BridgeMessage(type: "open", id: id, url: url)
+            pending[id] = Pending(continuation: continuation, message: message)
             Task {
-                do { try await send(BridgeMessage(type: "open", id: id, url: url)) }
+                do { try await send(message) }
                 catch { fail(id, error: error) }
             }
         }
     }
+
+    func unclaimed() -> [BridgeMessage] { pending.values.filter { $0.profile == nil }.map(\.message) }
 
     func claim(_ id: String, profile: String) -> Bool {
         guard var request = pending[id], request.profile == nil else { return false }

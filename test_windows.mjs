@@ -89,7 +89,7 @@ test('sleeping and unloaded tabs are selected without content scripts, reloads o
     { discarded: true, status: 'unloaded', url: '', pendingUrl: photo }]) {
     const h = browser([{ url: photo, active: false, ...state }]);
     assert.deepEqual(await routeToTab(photo, new LiveLearning(policy), h.api), { result: 'focused' });
-    assert.deepEqual(h.calls, [['focus', 1, { active: true }], ['window', 1, { focused: true }]]);
+    assert.deepEqual(h.calls, [['focus', 1, { active: true }]]);
     assert.equal(h.tabs.length, 1);
   }
 });
@@ -275,7 +275,8 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     await new Promise(setImmediate);
     for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
     await new Promise(setImmediate);
-    port.emit({ type: 'open', id: 'first-after-idle', url: 'https://example.test/short' });
+    const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short' };
+    port.emit(mode === 'safari' ? { name: 'link-reuse', userInfo: request } : request);
     await new Promise(setImmediate);
     assert.deepEqual(port.sent.find(message => message.id === 'first-after-idle'),
       { type: 'result', id: 'first-after-idle', result: 'focused' });
@@ -301,8 +302,19 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
 test('Windows focuses the existing deeper view without navigating or creating a tab', async () => {
   const h = browser([{ url: photo, active: true }]);
   assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api), { result: 'focused' });
-  assert.deepEqual(h.calls.map(call => call[0]), ['focus', 'window']);
+  assert.deepEqual(h.calls, []);
   assert.equal(h.tabs[0].url, photo);
+});
+
+test('repeated opens of the selected visible tab complete without redundant activation calls', async () => {
+  const h = browser([{ url: photo, active: true }]);
+  h.api.tabs.update = h.api.windows.update = () => { throw new Error('Redundant activation'); };
+  const { bridge } = sessionBridge(h, learningSession());
+  clearTimeout(bridge.timer);
+  for (let i = 0; i < 3; i++) assert.deepEqual(await bridge.open(place), { result: 'focused' });
+  assert.deepEqual(h.calls, []);
+  assert.equal(h.tabs.length, 1);
+  clearTimeout(bridge.timer);
 });
 
 test('place identity rules reject another place, conflicting identities and lookalike URLs', async () => {
@@ -335,8 +347,7 @@ test('an existing duplicate in a minimized window is restored instead of duplica
     { id: 1, focused: false, state: 'minimized' }, { id: 2, focused: false, state: 'normal' },
   ], 1);
   await routeToTab(place, new LiveLearning(policy), h.api, new Map([[2, 10], [1, 20]]));
-  assert.deepEqual(h.calls.map(call => call[0]), ['focus', 'window']);
-  assert.deepEqual(h.calls[1], ['window', 1, { state: 'normal', focused: true }]);
+  assert.deepEqual(h.calls, [['window', 1, { state: 'normal', focused: true }]]);
   assert.equal(h.tabs[0].url, photo);
 });
 
@@ -405,7 +416,7 @@ test('Slack sign-in link hints reuse the original destination without learning o
   }
   assert.equal(h.tabs.length, 1);
   assert.equal(h.tabs[0].url, target);
-  assert.deepEqual(h.calls.map(call => call[0]), ['focus', 'window', 'focus', 'window']);
+  assert.deepEqual(h.calls, []);
   assert.equal(learning.records.size, 0);
   assert.equal(learning.bytes, 0);
 });
@@ -461,7 +472,7 @@ test('a Snowflake account launcher preserves an existing Snowsight worksheet wit
   const h = browser([{ url: view, active: true }]);
   assert.deepEqual(await routeToTab(launcher, learning, h.api), { result: 'focused' });
   assert.deepEqual(await routeToTab(slackLink(launcher), learning, h.api), { result: 'focused' });
-  assert.deepEqual(h.calls.map(call => call[0]), ['focus', 'window', 'focus', 'window']);
+  assert.deepEqual(h.calls, []);
   assert.equal(h.tabs[0].url, view);
   assert.equal(learning.records.size, 0);
 });
@@ -673,7 +684,7 @@ test('a webpage new-tab click focuses an unloaded match without creating a tab o
   const { bridge } = sessionBridge(h, learningSession());
   clearTimeout(bridge.timer);
   assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: 1, active: false }), { result: 'focused' });
-  assert.deepEqual(h.calls, [['focus', 2, { active: true }], ['window', 1, { focused: true }]]);
+  assert.deepEqual(h.calls, [['focus', 2, { active: true }]]);
   assert.equal(h.tabs.length, 2);
   clearTimeout(bridge.timer);
 });
@@ -694,8 +705,7 @@ test('an unmatched ordinary blank-target link opens a foreground tab in its sour
   const { bridge } = sessionBridge(h, learningSession());
   clearTimeout(bridge.timer);
   assert.deepEqual(await bridge.open('https://example.test/new', { sourceTabId: 1, active: true }), { result: 'opened' });
-  assert.deepEqual(h.calls, [['create', { windowId: 1, url: 'https://example.test/new', active: true, index: 4 }],
-    ['window', 1, { focused: true }]]);
+  assert.deepEqual(h.calls, [['create', { windowId: 1, url: 'https://example.test/new', active: true, index: 4 }]]);
   clearTimeout(bridge.timer);
 });
 

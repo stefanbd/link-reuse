@@ -121,7 +121,7 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   const window = (source && windows.find(value => value.id === source.windowId)) ||
     candidates.find(value => value.focused) || candidates.find(value => value.id === lastFocused?.id) ||
     [...candidates].sort((left, right) => (windowFocusOrder.get(right.id) ?? 0) - (windowFocusOrder.get(left.id) ?? 0))[0];
-  const activateWindow = id => browser.windows.update(id, {
+  const activateWindow = id => windows.find(value => value.id === id)?.focused ? Promise.resolve() : browser.windows.update(id, {
     ...(windows.find(value => value.id === id)?.state === 'minimized' ? { state: 'normal' } : {}), focused: true,
   });
   const tabs = await browser.tabs.query({ windowType: 'normal' });
@@ -134,7 +134,7 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   if (match) {
     const current = await browser.tabs.get(match.id);
     if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
-    await browser.tabs.update(match.id, { active: true });
+    if (!current.active) await browser.tabs.update(match.id, { active: true });
     await activateWindow(match.windowId);
     return { result: 'focused' };
   }
