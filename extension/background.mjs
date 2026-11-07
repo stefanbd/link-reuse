@@ -3,6 +3,7 @@ import { canonicalDestination } from './canonical.mjs';
 import { allowsLearning } from './learning.mjs';
 import { BrowserBridge } from './browser-bridge.mjs';
 import { prepareNative } from './native-port.mjs';
+import { permittedTabs } from './matching.mjs';
 
 const observer = new RedirectObserver();
 const connectPort = prepareNative(chrome);
@@ -16,7 +17,7 @@ const ready = Promise.all([
   const bridge = new BrowserBridge(policy, {
     platform: platform.os,
     connectPort,
-    queryTabs: () => chrome.tabs.query({}),
+    queryTabs: () => permittedTabs(chrome),
     learningState: saved.learning,
     saveLearning: learning => chrome.storage.local.set({ learning }),
     resetLearning: () => { observer.tabs.clear(); observer.pending.clear(); },

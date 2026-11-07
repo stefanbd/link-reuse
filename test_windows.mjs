@@ -259,6 +259,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     storage: { local: { async setAccessLevel(value) { accessLevel = value.accessLevel; },
       get: () => new Promise(resolve => { release = resolve; }), async set(value) { saved = structuredClone(value); } },
       session: { async get() { return {}; }, async set() { throw new Error('Session storage must not own learned links.'); } } },
+    permissions: { getAll: async () => ({ origins: ['<all_urls>'] }) },
     tabs: { ...h.api.tabs, onUpdated: event(), onRemoved: event(), onActivated: event(),
       sendMessage() { throw new Error('Sleeping tab content must not be contacted to match it.'); } },
     windows: { ...h.api.windows, onFocusChanged: event(), onRemoved: event() },

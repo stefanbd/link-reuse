@@ -1,6 +1,7 @@
 import Foundation
 
 struct BridgeMessage: Codable, Sendable {
+    static let safariReady = Notification.Name("me.dichev.LinkReuse.Safari.ready")
     var type: String
     var id: String? = nil
     var url: String? = nil

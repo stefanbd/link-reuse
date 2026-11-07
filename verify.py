@@ -11,7 +11,8 @@ common = ['BrowserConfiguration.swift', 'OpenRequest.swift', 'WebLink.swift']
 for test, sources in [('test_open_request.swift', common),
                       ('test_mac_bridge.swift', common + ['MacBridge.swift', 'BridgeMessage.swift', 'Wire.swift']),
                       ('test_exchange.swift', ['BridgeMessage.swift', 'BridgeExchange.swift']),
-                      ('test_safari_bridge.swift', ['BridgeMessage.swift', 'BridgeExchange.swift', 'SafariBridge.swift'])]:
+                      ('test_safari_bridge.swift', ['BridgeMessage.swift', 'BridgeExchange.swift', 'SafariBridge.swift']),
+                      ('test_safari_browser_client.swift', ['BridgeMessage.swift', 'BridgeExchange.swift', 'SafariBridge.swift'])]:
     executable = output / pathlib.Path(test).stem
     subprocess.run(['xcrun', 'swiftc', '-swift-version', '6', '-module-cache-path', str(root / 'build/module-cache'),
                     *sources, test, '-o', str(executable)], cwd=root, check=True)

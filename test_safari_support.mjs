@@ -17,7 +17,7 @@ export function safariTransport({ automatic = true } = {}) {
       });
     }
     emit(message) { this.onmessage?.({ data: JSON.stringify(message) }); }
-    close() { if (this.readyState === 3) return; this.readyState = 3; this.onclose?.(); }
+    close() { if (this.readyState === 3) return; this.readyState = 3; this.onclose?.({ code: 1000 }); }
   }
   const native = {
     onMessage: { addListener: fn => callbacks.message.push(fn) },
@@ -29,10 +29,10 @@ export function safariTransport({ automatic = true } = {}) {
     runtime: {
       getURL: () => 'safari-web-extension://example/', getManifest: () => ({ version: '3.2.4' }),
       connectNative() { if (automatic) queueMicrotask(() => wake()); return native; },
-      sendNativeMessage() { nativeCalls++; throw new Error('Per-message native requests are forbidden.'); },
+      async sendNativeMessage() { nativeCalls++; return { type: 'ready', extensionVersion: '3.2.4' }; },
     },
   };
-  return { api, Socket, sockets, sent, wake, descriptor, get disconnected() { return disconnected; }, get nativeCalls() { return nativeCalls; },
+  return { api, Socket, sockets, sent, wake, descriptor, closeBootstrap() { for (const fn of callbacks.disconnect) fn(); }, get disconnected() { return disconnected; }, get nativeCalls() { return nativeCalls; },
     emit(message) { const current = sockets.at(-1); if (current?.readyState === 1) current.emit(message); else early.push(message); },
     emitRaw(message) { for (const fn of callbacks.message) fn(message); } };
 }

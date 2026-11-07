@@ -8,6 +8,13 @@ function urlKey(value) {
   } catch { return null; }
 }
 
+export async function permittedTabs(browser, query = {}) {
+  if (!browser.runtime?.getURL?.('').startsWith('safari-web-extension:')) return browser.tabs.query(query);
+  const { origins } = await browser.permissions.getAll();
+  if (!origins.length) throw new Error('Allow Link Reuse website access in Safari Settings → Extensions to reuse tabs.');
+  return browser.tabs.query({ ...query, url: origins });
+}
+
 export class LiveLearning {
   constructor(policy, rules = urlRules) {
     this.policy = policy; this.rules = rules; this.records = new Map(); this.settledURLs = new Map(); this.bytes = 0; this.revision = 0;
@@ -112,24 +119,19 @@ export class LiveLearning {
 }
 
 export async function routeToTab(url, learning, browser, windowFocusOrder = new Map(), opening = {}) {
-  const [allWindows, source, tabs] = await Promise.all([
-    browser.windows.getAll({ windowTypes: ['normal'] }),
-    Number.isInteger(opening.sourceTabId) ? browser.tabs.get(opening.sourceTabId) : null,
-    browser.tabs.query({ windowType: 'normal' }),
-  ]);
-  const windows = allWindows.filter(value => !value.incognito);
+  const windows = (await browser.windows.getAll({ windowTypes: ['normal'] })).filter(value => !value.incognito);
+  const source = Number.isInteger(opening.sourceTabId) ? await browser.tabs.get(opening.sourceTabId) : null;
   if (source?.incognito) throw new Error('Private tab links are not supported.');
+  const lastFocused = browser.windows.getLastFocused ? await browser.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null) : null;
   const visible = windows.filter(value => value.state !== 'minimized');
   const candidates = visible.length ? visible : windows;
-  let window = (source && windows.find(value => value.id === source.windowId)) || candidates.find(value => value.focused);
-  if (!window && browser.windows.getLastFocused) {
-    const lastFocused = await browser.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
-    window = candidates.find(value => value.id === lastFocused?.id);
-  }
-  window ||= [...candidates].sort((left, right) => (windowFocusOrder.get(right.id) ?? 0) - (windowFocusOrder.get(left.id) ?? 0))[0];
+  const window = (source && windows.find(value => value.id === source.windowId)) ||
+    candidates.find(value => value.focused) || candidates.find(value => value.id === lastFocused?.id) ||
+    [...candidates].sort((left, right) => (windowFocusOrder.get(right.id) ?? 0) - (windowFocusOrder.get(left.id) ?? 0))[0];
   const activateWindow = id => windows.find(value => value.id === id)?.focused ? Promise.resolve() : browser.windows.update(id, {
     ...(windows.find(value => value.id === id)?.state === 'minimized' ? { state: 'normal' } : {}), focused: true,
   });
+  const tabs = await permittedTabs(browser, { windowType: 'normal' });
   learning.prune(tabs);
   const request = learning.resolve(url);
   const preferred = tabs.find(tab => tab.active && tab.windowId === window?.id);

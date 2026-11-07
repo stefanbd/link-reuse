@@ -31,7 +31,7 @@ actor SafariBridge {
         self.version = version
         self.wake = wake
         let parameters = NWParametersBuilder.parameters {
-            WebSocket { TCP() }.maximumMessageSize(1_048_576).autoReplyPing(true).subprotocols(["link-reuse"])
+            WebSocket { TCP() }.maximumMessageSize(1_048_576).autoReplyPing(true)
         }
         parameters.parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         parameters.parameters.acceptLocalOnly = true
@@ -73,10 +73,14 @@ actor SafariBridge {
         let reply: BridgeMessage
         do { reply = try await exchange.request(url) }
         catch {
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").error("Safari transport: failed")
+            let failure = error as NSError
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").error("Safari transport: failed \(failure.domain, privacy: .public) \(failure.code)")
             throw error
         }
-        if let error = reply.error { throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error]) }
+        if let error = reply.error {
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").error("Safari transport: extension operation failed")
+            throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+        }
         guard let result = reply.result, ["focused", "opened"].contains(result) else { throw POSIXError(.EINVAL) }
         Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: completed \(result, privacy: .public)")
         return result
@@ -85,12 +89,20 @@ actor SafariBridge {
     private func deliver(_ message: BridgeMessage) async throws {
         if let (profile, client) = clients.filter({ $0.value.authenticated }).max(by: { $0.value.activity < $1.value.activity }), let id = message.id {
             Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: channel")
-            if await exchange.claim(id, profile: profile) { try await send(message, to: client.connection) }
+            if await exchange.claim(id, profile: profile) {
+                try await send(message, to: client.connection)
+                Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: sent")
+            }
         } else {
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: bootstrap")
-            let token = Data(HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)).base64EncodedString()
-            try await wake(BridgeMessage(type: "connect", endpoint: endpoint, token: token))
+            try await extensionReady()
         }
+    }
+
+    func extensionReady() async throws {
+        guard !(await exchange.unclaimed()).isEmpty else { return }
+        Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: bootstrap")
+        let token = Data(HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)).base64EncodedString()
+        try await wake(BridgeMessage(type: "connect", endpoint: endpoint, token: token))
     }
 
     private func accept(_ connection: NetworkConnection<WebSocket>) async {
@@ -112,10 +124,11 @@ actor SafariBridge {
             guard hello.type == "hello", clients[identity] != nil,
                   let token = hello.token, let code = Data(base64Encoded: token),
                   HMAC<SHA256>.isValidAuthenticationCode(code, authenticating: Self.authenticationData, using: key) else { throw POSIXError(.EPERM) }
+            try await send(BridgeMessage(type: "ready", extensionVersion: version, profile: identity), to: connection)
+            guard hello.extensionVersion == version else { throw POSIXError(.EPROTO) }
             if hello.result == "active" { activity += 1 }
             clients[identity]?.authenticated = true
             clients[identity]?.activity = hello.result == "active" ? activity : 0
-            try await send(BridgeMessage(type: "ready", extensionVersion: version, profile: identity), to: connection)
             for request in await exchange.unclaimed() {
                 if let id = request.id, await exchange.claim(id, profile: identity) { try await send(request, to: connection) }
             }
@@ -133,16 +146,38 @@ actor SafariBridge {
                 default: throw POSIXError(.EINVAL)
                 }
             }
-        } catch {}
+        } catch {
+            let failure = error as NSError
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari channel ended: \(failure.domain, privacy: .public) \(failure.code)")
+        }
         clients.removeValue(forKey: identity)
         await exchange.finish(profile: identity)
         if connection.state == .ready { try? await connection.close() }
     }
 
     private static func read(_ connection: NetworkConnection<WebSocket>) async throws -> BridgeMessage {
-        let frame = try await connection.receive()
-        guard frame.metadata.opcode == .text, frame.metadata.isComplete, frame.content.count <= 1_048_576 else { throw POSIXError(.EINVAL) }
-        return try JSONDecoder().decode(BridgeMessage.self, from: frame.content)
+        while true {
+            var result: BridgeMessage?
+            try await connection.startReceive { receive in
+                // Control frames can have empty payloads.
+                var frame = try await receive(0, 1_048_576)
+                let opcode = frame.metadata.opcode
+                var payload = frame.content
+                while !frame.metadata.isComplete {
+                    guard payload.count < 1_048_576 else { throw POSIXError(.EMSGSIZE) }
+                    frame = try await receive(1, 1_048_576 - payload.count)
+                    payload.append(frame.content)
+                }
+                switch opcode {
+                case .ping, .pong:
+                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").debug("Safari control frame bytes: \(payload.count)")
+                case .close: throw POSIXError(.EPIPE)
+                case .text: result = try JSONDecoder().decode(BridgeMessage.self, from: payload)
+                default: throw POSIXError(.EINVAL)
+                }
+            }
+            if let result { return result }
+        }
     }
 
     private func send(_ message: BridgeMessage, to connection: NetworkConnection<WebSocket>) async throws {

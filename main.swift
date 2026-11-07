@@ -11,12 +11,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(resources: AppResources) { self.resources = resources }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(safariReady(_:)), name: BridgeMessage.safariReady, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(browserTerminated(_:)),
             name: NSWorkspace.didTerminateApplicationNotification, object: nil)
         terminateIfUnused()
     }
 
     @objc private func browserTerminated(_ notification: Notification) { terminateIfUnused() }
+
+    @objc private func safariReady(_ notification: Notification) {
+        guard let safari else { return }
+        Task { try? await safari.extensionReady() }
+    }
 
     private func terminateIfUnused() {
         let running = resources.browsers.contains { !NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundleID).isEmpty }
@@ -61,6 +67,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let request = pending.removeFirst()
                 do { try await open(request) }
                 catch {
+                    if CommandLine.arguments.contains("--diagnostic") {
+                        let failure = error as NSError
+                        fputs("Link Reuse request failed: \(failure.domain) \(failure.code)\n", stderr)
+                        continue
+                    }
                     let alert = NSAlert()
                     alert.messageText = "Couldn’t open the link in \(request.browser.name)"
                     alert.informativeText = error.localizedDescription + " Check whether the link opened before trying again."

@@ -3,8 +3,31 @@ import assert from 'node:assert/strict';
 import { connectNative, prepareNative } from './extension/native-port.mjs';
 import { RedirectObserver } from './extension/observer.mjs';
 import { safariTransport } from './test_safari_support.mjs';
+import { permittedTabs } from './extension/matching.mjs';
 
-test('Safari connects once and sends opens/results over its authenticated local channel without native RPCs', async () => {
+test('Safari queries only granted websites without prompting for unrelated open tabs', async () => {
+  const calls = [];
+  const api = {
+    runtime: { getURL: () => 'safari-web-extension://test/' },
+    permissions: { getAll: async () => ({ origins: ['https://allowed.test/*'] }) },
+    tabs: { query: async query => { calls.push(query); return [{ id: 1 }]; } },
+  };
+  assert.deepEqual(await permittedTabs(api, { windowType: 'normal' }), [{ id: 1 }]);
+  assert.deepEqual(calls, [{ windowType: 'normal', url: ['https://allowed.test/*'] }]);
+  api.permissions.getAll = async () => ({ origins: [] });
+  await assert.rejects(permittedTabs(api), /Allow Link Reuse website access/);
+  assert.equal(calls.length, 1);
+  api.permissions.getAll = async () => ({ origins: ['<all_urls>'] });
+  await permittedTabs(api);
+  assert.deepEqual(calls.at(-1), { url: ['<all_urls>'] });
+});
+
+test('Chromium tab queries keep their original filters and need no extra permissions call', async () => {
+  const api = { runtime: { getURL: () => 'chrome-extension://test/' }, tabs: { query: async query => query } };
+  assert.deepEqual(await permittedTabs(api, { windowType: 'normal' }), { windowType: 'normal' });
+});
+
+test('Safari connects once and sends opens/results over its authenticated local channel without per-open native RPCs', async () => {
   const h = safariTransport();
   const port = connectNative(h.api, h.Socket);
   const messages = [];
@@ -20,14 +43,14 @@ test('Safari connects once and sends opens/results over its authenticated local 
     port.postMessage({ type: 'result', id: String(i), result: 'focused' });
   }
   assert.equal(h.sockets.length, 1);
-  assert.equal(h.nativeCalls, 0);
+  assert.equal(h.nativeCalls, 1);
   assert.equal(h.sent.filter(message => message.type === 'hello').length, 1);
   assert.equal(h.sent.filter(message => message.type === 'result').length, 3);
   assert.equal(h.sent.some(message => message.type === 'claim'), false);
   port.disconnect();
 });
 
-test('Safari learning is ready without starting a native process while the app is absent', () => {
+test('Safari learning is ready without launching the routing app', () => {
   const h = safariTransport({ automatic: false });
   const port = connectNative(h.api, h.Socket);
   const messages = [];
@@ -35,8 +58,35 @@ test('Safari learning is ready without starting a native process while the app i
   port.postMessage({ type: 'hello' });
   assert.equal(messages[0].type, 'ready');
   assert.equal(port.transportConnected, false);
-  assert.equal(h.nativeCalls, 0);
+  assert.equal(h.nativeCalls, 1);
   assert.equal(h.sockets.length, 0);
+  port.disconnect();
+});
+
+test('Safari retains an early native-version reply until the shared engine can reload', async () => {
+  const h = safariTransport({ automatic: false });
+  h.api.runtime.sendNativeMessage = async () => ({ type: 'ready', extensionVersion: '3.2.5' });
+  const connect = prepareNative(h.api, h.Socket);
+  await new Promise(setImmediate);
+  const port = connect(), messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.5' }]);
+  assert.equal(port.closed, true);
+});
+
+test('Safari retains its warm channel when the one-time native bootstrap port ends', async () => {
+  const h = safariTransport(), port = connectNative(h.api, h.Socket), messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  h.closeBootstrap();
+  assert.equal(port.closed, false);
+  assert.equal(port.transportConnected, true);
+  h.emit({ type: 'open', id: 'after-bootstrap', url: 'https://example.test/item' });
+  assert.equal(messages.at(-1).id, 'after-bootstrap');
+  port.postMessage({ type: 'result', id: 'after-bootstrap', result: 'focused' });
+  assert.equal(h.sent.at(-1).result, 'focused');
   port.disconnect();
 });
 
@@ -77,6 +127,7 @@ test('Safari closes a failed channel once, discards late messages and replaces i
   h.sockets[0].close();
   h.sockets[0].emit({ type: 'open', id: 'late', url: 'https://example.test/item' });
   port.disconnect();
+  await new Promise(setImmediate);
   assert.equal(disconnected, 1);
   assert.equal(h.disconnected, 1);
   assert.equal(messages.some(message => message.id === 'late'), false);
@@ -156,6 +207,7 @@ test('Safari URL updates and verified document messages retain automatic rewrite
   globalThis.chrome = {
     runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.4' }), onMessage: event(), onStartup: event() },
     storage: { local: { async get() { return {}; }, async set() {} } },
+    permissions: { getAll: async () => ({ origins: ['<all_urls>'] }) },
     tabs: { async query() { return [{ ...tab }]; }, async get() { return { ...tab }; },
       async update(id) { focused.push(id); }, async create() { throw Error('Unexpected duplicate'); },
       async sendMessage() { return { url: tab.url, referrer: '', interacted: false }; },

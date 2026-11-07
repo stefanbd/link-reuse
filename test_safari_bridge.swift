@@ -32,12 +32,12 @@ struct SafariBridgeTests {
         return try JSONDecoder().decode(BridgeMessage.self, from: value.content)
     }
 
-    static func connect(_ descriptor: BridgeMessage, origin: String = origin, token: String? = nil, profile: String = UUID().uuidString) async throws -> NetworkConnection<WebSocket> {
+    static func connect(_ descriptor: BridgeMessage, origin: String = origin, token: String? = nil, profile: String = UUID().uuidString, version: String = "3.2.4") async throws -> NetworkConnection<WebSocket> {
         guard let endpoint = descriptor.endpoint, let url = URL(string: endpoint) else { preconditionFailure() }
         let socket = NetworkConnection(to: .url(url)) {
-            WebSocket { TCP() }.additionalHeaders([("Origin", origin)]).subprotocols(["link-reuse"])
+            WebSocket { TCP() }.additionalHeaders([("Origin", origin)])
         }
-        try await send(BridgeMessage(type: "hello", result: "active", profile: profile, token: token ?? descriptor.token), to: socket)
+        try await send(BridgeMessage(type: "hello", result: "active", extensionVersion: version, profile: profile, token: token ?? descriptor.token), to: socket)
         return socket
     }
 
@@ -50,6 +50,13 @@ struct SafariBridgeTests {
         guard let endpoint = descriptor.endpoint, let parsed = URL(string: endpoint) else { preconditionFailure() }
         precondition(parsed.host == "127.0.0.1" && parsed.port != nil)
 
+        let outdated = try await connect(descriptor, version: "3.2.3")
+        let update = try await receive(outdated)
+        precondition(update.extensionVersion == "3.2.4")
+        try await bridge.extensionReady()
+        let retriedBootstrap = await deliveries.next()
+        precondition(retriedBootstrap.endpoint == descriptor.endpoint && retriedBootstrap.token == descriptor.token)
+
         let profile = UUID().uuidString
         let socket = try await connect(descriptor, profile: profile)
         let ready = try await receive(socket)
@@ -61,6 +68,11 @@ struct SafariBridgeTests {
         let initialResult = try await opening.value
         precondition(initialResult == "focused")
 
+        try await socket.ping(Data([1]))
+        let pong = try await socket.receive()
+        precondition(pong.metadata.opcode == .pong)
+        try await Task.sleep(for: .seconds(12))
+
         for index in 0..<3 {
             let routing = Task { try await bridge.open("https://example.test/warm/\(index)") }
             let request = try await receive(socket)
@@ -70,7 +82,7 @@ struct SafariBridgeTests {
             precondition(result == "focused")
         }
         let wakes = await deliveries.count
-        precondition(wakes == 1)
+        precondition(wakes == 2)
 
         do {
             let bad = try await connect(descriptor, origin: "https://example.test", token: "")
