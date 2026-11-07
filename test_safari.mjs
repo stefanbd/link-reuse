@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { connectNative } from './extension/native-port.mjs';
+import { connectNative, prepareNative } from './extension/native-port.mjs';
 import { RedirectObserver } from './extension/observer.mjs';
 
 function safari({ claim = 'accepted', fail = false } = {}) {
@@ -17,10 +17,10 @@ function safari({ claim = 'accepted', fail = false } = {}) {
     async sendNativeMessage(_name, message) {
       sent.push(message);
       if (fail) throw new Error('Native handler unavailable');
-      return message.type === 'hello' ? { type: 'ready', extensionVersion: '3.2.0' } : { type: 'receipt', result: claim };
+      return message.type === 'hello' ? { type: 'ready', extensionVersion: '3.2.1' } : { type: 'receipt', result: claim };
     },
   } };
-  return { api, sent, get disconnected() { return disconnected; }, emit: message => callbacks.message.forEach(fn => fn(message)) };
+  return { api, get sent() { return sent.filter(message => message.type !== 'trace'); }, get disconnected() { return disconnected; }, emit: message => callbacks.message.forEach(fn => fn(message)) };
 }
 
 test('Safari translates native messaging into the same ready/open/result contract', async () => {
@@ -30,7 +30,7 @@ test('Safari translates native messaging into the same ready/open/result contrac
   port.onMessage.addListener(message => messages.push(message));
   port.postMessage({ type: 'hello' });
   await new Promise(setImmediate);
-  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.0' }]);
+  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.1' }]);
   const opening = { type: 'open', id: 'request', url: 'https://example.test/item' };
   h.emit(opening);
   await new Promise(setImmediate);
@@ -49,11 +49,14 @@ test('an unselected Safari profile cannot route the same external request', asyn
   const port = connectNative(h.api);
   const messages = [];
   port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  messages.length = 0;
   h.emit({ type: 'open', id: 'request', url: 'https://example.test/item' });
   h.emit({ type: 'wrong', id: 'request', url: 'https://example.test/item' });
   await new Promise(setImmediate);
   assert.deepEqual(messages, []);
-  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent.length, 2);
   port.disconnect();
 });
 
@@ -74,10 +77,14 @@ test('Safari native failures disconnect once and never manufacture an opening re
 test('a late Safari claim cannot route after its native connection was closed', async () => {
   const h = safari();
   let release;
-  h.api.runtime.sendNativeMessage = () => new Promise(resolve => { release = resolve; });
+  const send = h.api.runtime.sendNativeMessage;
+  h.api.runtime.sendNativeMessage = (application, message) => message.type === 'claim' ?
+    new Promise(resolve => { release = resolve; }) : send(application, message);
   const port = connectNative(h.api);
   let opened = false;
-  port.onMessage.addListener(() => { opened = true; });
+  port.onMessage.addListener(message => { if (message.type === 'open') opened = true; });
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
   h.emit({ type: 'open', id: 'request', url: 'https://example.test/item' });
   port.disconnect();
   release({ result: 'accepted' });
@@ -126,7 +133,7 @@ test('Safari URL updates learn same-document routes without Chromium history eve
   context.mock.method(globalThis, 'setTimeout', (fn, delay) => { const id = ++sequence; scheduled.set(id, { fn, delay }); return id; });
   context.mock.method(globalThis, 'clearTimeout', id => scheduled.delete(id));
   globalThis.chrome = {
-    runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.0' }), onMessage: event(), onStartup: event() },
+    runtime: { ...raw.api.runtime, getPlatformInfo: async () => ({ os: 'mac' }), getManifest: () => ({ version: '3.2.1' }), onMessage: event(), onStartup: event() },
     storage: { session: { async get() { return {}; }, async set() {} } },
     tabs: { async query() { return [{ ...tab }]; }, async get() { return { ...tab }; },
       async update(id) { focused.push(id); }, async create() { throw Error('Unexpected duplicate'); },
@@ -160,4 +167,50 @@ test('Safari URL updates learn same-document routes without Chromium history eve
     const status = await new Promise(resolve => chrome.runtime.onMessage.emit({ type: 'status' }, {}, resolve));
     assert.equal(status.stats.records, 0);
   } finally { globalThis.chrome = original; }
+});
+
+test('Safari captures an external open before asynchronous engine startup and claims it only after ready', async () => {
+  const h = safari();
+  const connect = prepareNative(h.api);
+  h.emit({ type: 'open', id: 'early', url: 'https://example.test/item' });
+  await new Promise(setImmediate);
+  assert.equal(h.sent.length, 0);
+  const port = connect();
+  const messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  assert.equal(h.sent.length, 0);
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  assert.deepEqual(messages.map(message => message.type), ['ready', 'open']);
+  assert.equal(h.sent[1].type, 'claim');
+  assert.equal(h.sent[1].id, 'early');
+  port.disconnect();
+});
+
+test('Safari bounds pre-startup native deliveries and replaces a disconnected port', async () => {
+  const h = safari();
+  const connect = prepareNative(h.api);
+  for (let i = 0; i < 100; i++) h.emit({ type: 'open', id: String(i), url: 'https://example.test/item' });
+  const port = connect();
+  let opens = 0;
+  port.onMessage.addListener(message => { if (message.type === 'open') opens++; });
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  assert.equal(opens, 16);
+  port.disconnect();
+  const replacement = connect();
+  assert.notEqual(replacement, port);
+  assert.equal(replacement.closed, false);
+  replacement.disconnect();
+});
+
+test('Chromium native connections remain lazy and reconnect with a fresh browser port', () => {
+  let calls = 0;
+  const api = { runtime: { getURL: () => 'chrome-extension://test/', connectNative() {
+    calls++; return { onDisconnect: { addListener() {} } };
+  } } };
+  const connect = prepareNative(api);
+  assert.equal(calls, 0);
+  assert.notEqual(connect(), connect());
+  assert.equal(calls, 2);
 });

@@ -1,5 +1,6 @@
 import AppKit
 import SafariServices
+import OSLog
 import Darwin
 
 @MainActor
@@ -43,6 +44,7 @@ final class SafariBridge {
     private static func dispatch(_ message: BridgeMessage) async throws {
         let data = try JSONEncoder().encode(message)
         let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: dispatch")
         try await SFSafariApplication.dispatchMessage(withName: "link-reuse", toExtensionWithIdentifier: SafariIPC.extensionIdentifier, userInfo: payload)
     }
 

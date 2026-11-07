@@ -32,7 +32,12 @@ def prepare(group):
             shutil.copytree(ROOT / 'extension', resources)
             safari_manifest = manifest.copy()
             for key in ['key', 'incognito']: safari_manifest.pop(key, None)
-            safari_manifest['background'] = {'page': 'background.html', 'persistent': False}
+            safari_manifest['manifest_version'] = 2
+            safari_manifest['browser_action'] = safari_manifest.pop('action')
+            safari_manifest['permissions'] = manifest['permissions'] + safari_manifest.pop('host_permissions')
+            safari_manifest['background'] = {'page': 'background.html', 'persistent': True}
+            safari_manifest['content_security_policy'] = "script-src 'self'; object-src 'none'"
+            safari_manifest['browser_specific_settings'] = {'safari': {'strict_min_version': '18.4'}}
             (resources / 'manifest.json').write_text(json.dumps(safari_manifest, indent=2) + '\n')
         info = {
             'CFBundleIdentifier': 'me.dichev.LinkReuse' + ('.Safari' if name == 'safari' else ''),

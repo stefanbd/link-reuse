@@ -21,17 +21,22 @@ class PackagingTests(unittest.TestCase):
                 original = json.loads((build.ROOT / 'extension/manifest.json').read_text())
                 manifests = [json.loads((folder / 'manifest.json').read_text()) for folder in [chromium, safari]]
                 for manifest in manifests:
-                    for key in ['version', 'permissions', 'host_permissions', 'content_scripts', 'action']:
+                    for key in ['version', 'content_scripts']:
                         self.assertEqual(manifest[key], original[key])
                 for source in (build.ROOT / 'extension').iterdir():
                     if source.is_file() and source.name != 'manifest.json':
                         self.assertEqual((chromium / source.name).read_bytes(), source.read_bytes())
                         self.assertEqual((safari / source.name).read_bytes(), source.read_bytes())
+                self.assertEqual(manifests[0]['permissions'], original['permissions'])
+                self.assertEqual(manifests[0]['host_permissions'], original['host_permissions'])
+                self.assertEqual(manifests[1]['permissions'], original['permissions'] + original['host_permissions'])
+                self.assertEqual(manifests[1]['browser_action'], original['action'])
+                self.assertEqual(manifests[1]['manifest_version'], 2)
                 self.assertNotIn('key', manifests[1])
                 self.assertNotIn('incognito', manifests[1])
                 self.assertEqual(manifests[0]['background'], original['background'])
                 self.assertEqual(manifests[1]['background']['page'], 'background.html')
-                self.assertFalse(manifests[1]['background']['persistent'])
+                self.assertTrue(manifests[1]['background']['persistent'])
                 infos = [plistlib.loads((build.BUILD / (name + '-info.plist')).read_bytes()) for name in ['app', 'safari']]
                 self.assertEqual(infos[0]['CFBundleShortVersionString'], infos[1]['CFBundleShortVersionString'])
                 self.assertEqual(infos[0]['LinkReuseAppGroup'], infos[1]['LinkReuseAppGroup'])

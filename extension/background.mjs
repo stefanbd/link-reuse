@@ -2,9 +2,10 @@ import { RedirectObserver } from './observer.mjs';
 import { canonicalDestination } from './canonical.mjs';
 import { allowsLearning } from './learning.mjs';
 import { BrowserBridge } from './browser-bridge.mjs';
-import { connectNative } from './native-port.mjs';
+import { prepareNative } from './native-port.mjs';
 
 const observer = new RedirectObserver();
+const connectPort = prepareNative(chrome);
 const ready = Promise.all([
   fetch(chrome.runtime.getURL('learning-policy.json')).then(response => response.json()),
   chrome.runtime.getPlatformInfo(),
@@ -13,12 +14,12 @@ const ready = Promise.all([
   const saved = await chrome.storage.session.get('learning');
   const bridge = new BrowserBridge(policy, {
     platform: platform.os,
-    connectPort: () => connectNative(chrome),
+    connectPort,
     queryTabs: () => chrome.tabs.query({}),
     learningState: saved.learning,
     saveLearning: learning => chrome.storage.session.set({ learning }),
     resetLearning: () => { observer.tabs.clear(); observer.pending.clear(); },
-    badge: text => { void chrome.action.setBadgeText({ text }); },
+    badge: text => { void (chrome.action ?? chrome.browserAction).setBadgeText({ text }); },
     extensionVersion: chrome.runtime.getManifest().version,
     reload: async version => {
       const manifest = await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' }).then(response => response.json());
