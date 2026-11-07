@@ -25,9 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func open(_ request: OpenRequest) async throws {
         if request.browser.profilePath == nil {
+            if let running = NSRunningApplication.runningApplications(withBundleIdentifier: request.browser.bundleID).first {
+                running.activate()
+            } else {
+                guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.browser.bundleID) else { throw CocoaError(.fileNoSuchFile) }
+                _ = try await NSWorkspace.shared.openApplication(at: app, configuration: .init())
+            }
             if safari == nil { safari = try SafariBridge(directory: SafariIPC.directory()) }
             _ = try await safari?.open(request.url.absoluteString)
-            NSRunningApplication.runningApplications(withBundleIdentifier: request.browser.bundleID).first?.activate()
             return
         }
         var sessions = try MacBridge.sessions(browser: request.browser.bundleID)
