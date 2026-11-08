@@ -67,4 +67,3 @@ except BaseException:
 finally:
     connection.close()
     subprocess.run(['open', '-g', '-a', '/Applications/OpenIn.app'], check=True)
-
