@@ -119,19 +119,25 @@ export class LiveLearning {
 }
 
 export async function routeToTab(url, learning, browser, windowFocusOrder = new Map(), opening = {}) {
-  const windows = (await browser.windows.getAll({ windowTypes: ['normal'] })).filter(value => !value.incognito);
-  const source = Number.isInteger(opening.sourceTabId) ? await browser.tabs.get(opening.sourceTabId) : null;
+  const [allWindows, source, tabs] = await Promise.all([
+    browser.windows.getAll({ windowTypes: ['normal'] }),
+    Number.isInteger(opening.sourceTabId) ? browser.tabs.get(opening.sourceTabId) : null,
+    permittedTabs(browser, { windowType: 'normal' }),
+  ]);
+  const windows = allWindows.filter(value => !value.incognito);
   if (source?.incognito) throw new Error('Private tab links are not supported.');
-  const lastFocused = browser.windows.getLastFocused ? await browser.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null) : null;
   const visible = windows.filter(value => value.state !== 'minimized');
   const candidates = visible.length ? visible : windows;
-  const window = (source && windows.find(value => value.id === source.windowId)) ||
-    candidates.find(value => value.focused) || candidates.find(value => value.id === lastFocused?.id) ||
-    [...candidates].sort((left, right) => (windowFocusOrder.get(right.id) ?? 0) - (windowFocusOrder.get(left.id) ?? 0))[0];
+  let window = (source && windows.find(value => value.id === source.windowId)) || candidates.find(value => value.focused);
+  if (!window && candidates.length === 1) window = candidates[0];
+  if (!window && candidates.length > 1 && browser.windows.getLastFocused) {
+    const lastFocused = await browser.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
+    window = candidates.find(value => value.id === lastFocused?.id);
+  }
+  window ||= [...candidates].sort((left, right) => (windowFocusOrder.get(right.id) ?? 0) - (windowFocusOrder.get(left.id) ?? 0))[0];
   const activateWindow = id => windows.find(value => value.id === id)?.focused ? Promise.resolve() : browser.windows.update(id, {
     ...(windows.find(value => value.id === id)?.state === 'minimized' ? { state: 'normal' } : {}), focused: true,
   });
-  const tabs = await permittedTabs(browser, { windowType: 'normal' });
   learning.prune(tabs);
   const request = learning.resolve(url);
   const preferred = tabs.find(tab => tab.active && tab.windowId === window?.id);
@@ -147,6 +153,7 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
     return { result: 'focused' };
   }
   const active = opening.active !== false;
+  await opening.beforeCreate?.();
   if (opening.deadline && opening.deadline <= Date.now()) throw new Error('The external request expired. Please open the link again.');
   const created = window ? await browser.tabs.create({ windowId: window.id, url, active,
     ...(source?.windowId === window.id ? { index: source.index + 1 } : {}) }) :

@@ -6,7 +6,9 @@ import { prepareNative } from './native-port.mjs';
 import { permittedTabs } from './matching.mjs';
 
 const observer = new RedirectObserver();
-const connectPort = prepareNative(chrome);
+// Safari can refresh manifest metadata before this background context reloads.
+const extensionVersion = chrome.runtime.getManifest().version;
+const connectPort = prepareNative(chrome, undefined, extensionVersion);
 const ready = Promise.all([
   fetch(chrome.runtime.getURL('learning-policy.json')).then(response => response.json()),
   chrome.runtime.getPlatformInfo(),
@@ -22,7 +24,7 @@ const ready = Promise.all([
     saveLearning: learning => chrome.storage.local.set({ learning }),
     resetLearning: () => { observer.tabs.clear(); observer.pending.clear(); },
     badge: text => { void (chrome.action ?? chrome.browserAction).setBadgeText({ text }); },
-    extensionVersion: chrome.runtime.getManifest().version,
+    extensionVersion,
     reload: async version => {
       const manifest = await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' }).then(response => response.json());
       if (manifest.version !== version) throw new Error(platform.os === 'win' ?

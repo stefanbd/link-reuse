@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func open(_ request: OpenRequest) async throws {
         if request.browser.profilePath == nil {
             if let running = NSRunningApplication.runningApplications(withBundleIdentifier: request.browser.bundleID).first {
-                running.activate()
+                if !running.isActive { running.activate() }
             } else {
                 guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.browser.bundleID) else { throw CocoaError(.fileNoSuchFile) }
                 _ = try await NSWorkspace.shared.openApplication(at: app, configuration: .init())
@@ -72,6 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         fputs("Link Reuse request failed: \(failure.domain) \(failure.code)\n", stderr)
                         continue
                     }
+                    NSApp.setActivationPolicy(.accessory)
+                    defer { NSApp.setActivationPolicy(.prohibited) }
                     let alert = NSAlert()
                     alert.messageText = "Couldn’t open the link in \(request.browser.name)"
                     alert.informativeText = error.localizedDescription + " Check whether the link opened before trying again."
@@ -113,7 +115,6 @@ func main() async throws {
     }
     let application = NSApplication.shared
     let delegate = AppDelegate(resources: try AppResources())
-    application.setActivationPolicy(.accessory)
     application.delegate = delegate
     withExtendedLifetime(delegate) { application.run() }
 }

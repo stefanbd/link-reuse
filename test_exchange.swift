@@ -41,6 +41,31 @@ struct ExchangeTests {
         let chromeReply = try await chromium.value
         precondition(chromeReply.result == "opened")
 
+        let reconnecting = Task { try await exchange.request("https://example.test/reconnecting") }
+        let reconnectingMessage = await deliveries.next()
+        guard let reconnectingID = reconnectingMessage.id else { preconditionFailure() }
+        check(await exchange.claim(reconnectingID, profile: "disconnected"))
+        await exchange.disconnected(profile: "disconnected")
+        let unclaimed = await exchange.unclaimed()
+        precondition(unclaimed.map(\.id) == [reconnectingID])
+        check(!(await exchange.authorizeCreation(reconnectingID, profile: "disconnected")))
+        check(await exchange.claim(reconnectingID, profile: "replacement"))
+        check(await exchange.receive(BridgeMessage(type: "result", id: reconnectingID, result: "focused", profile: "replacement")))
+        let recovered = try await reconnecting.value
+        precondition(recovered.result == "focused")
+
+        let authorized = Task { try await exchange.request("https://example.test/authorized") }
+        let authorizedMessage = await deliveries.next()
+        guard let authorizedID = authorizedMessage.id else { preconditionFailure() }
+        check(await exchange.claim(authorizedID, profile: "creator"))
+        check(!(await exchange.authorizeCreation(authorizedID, profile: "other")))
+        check(await exchange.authorizeCreation(authorizedID, profile: "creator"))
+        check(!(await exchange.authorizeCreation(authorizedID, profile: "creator")))
+        await exchange.disconnected(profile: "creator")
+        check((await exchange.unclaimed()).isEmpty)
+        do { _ = try await authorized.value; preconditionFailure("Uncertain creation was replayed") }
+        catch let error as POSIXError { precondition(error.code == .EPIPE) }
+
         let failing = BridgeExchange { _ in throw POSIXError(.ENOENT) }
         do { _ = try await failing.request("https://example.test/item"); preconditionFailure() }
         catch let error as POSIXError { precondition(error.code == .ENOENT) }
@@ -59,4 +84,6 @@ struct ExchangeTests {
         }
         print("Shared native acknowledgements, profile claims, late replies, transport failure and 16-request bound passed")
     }
+
+    static func check(_ value: Bool) { precondition(value) }
 }

@@ -17,7 +17,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             response.userInfo = [SFExtensionMessageKey: ["type": "receipt"]]
         } else if message["type"] as? String == "hello" {
             Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari startup version: \(version, privacy: .public)")
-            response.userInfo = [SFExtensionMessageKey: ["type": "ready", "extensionVersion": version]]
+            response.userInfo = [SFExtensionMessageKey: ["type": "receipt"]]
             DistributedNotificationCenter.default().postNotificationName(BridgeMessage.safariReady, object: nil, userInfo: nil, deliverImmediately: true)
         } else {
             context.cancelRequest(withError: CocoaError(.coderInvalidValue))

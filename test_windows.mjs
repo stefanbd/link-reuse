@@ -279,14 +279,15 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     chrome.runtime.onMessage.emit({ type: 'canonical', url: h.tabs[0].url, hrefs: ['https://example.test/live?view=main'] },
       { tab: h.tabs[0], frameId: 0, documentId: 'early' }, () => {});
     assert.equal(pending.size, 0);
+    if (mode === 'safari') chrome.runtime.getManifest = () => ({ version: '3.2.5' });
     release({ learning: [{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }] });
     await new Promise(setImmediate);
     for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
     await new Promise(setImmediate);
-    const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short' };
+    const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short', deadline: Date.now() + 10_000 };
     if (safari) safari.emit(request); else port.emit(request);
     await new Promise(setImmediate);
-    assert.deepEqual((safari?.sent ?? port.sent).find(message => message.id === 'first-after-idle'),
+    assert.deepEqual((safari?.sent ?? port.sent).find(message => message.type === 'result' && message.id === 'first-after-idle'),
       { type: 'result', id: 'first-after-idle', result: 'focused' });
     assert.equal(h.tabs.length, 1);
     assert.equal(saved.learning.length, 2);
@@ -326,6 +327,52 @@ test('repeated opens of the selected visible tab complete without redundant acti
   clearTimeout(bridge.timer);
 });
 
+test('tab lookup runs while window lookup is pending and a known focused window skips the fallback query', async () => {
+  const h = browser([{ url: photo, active: true }]);
+  let release, queried = false;
+  h.api.windows.getAll = () => new Promise(resolve => { release = resolve; });
+  h.api.windows.getLastFocused = () => { throw new Error('Unnecessary last-focused query'); };
+  const query = h.api.tabs.query;
+  h.api.tabs.query = async () => { queried = true; return query(); };
+  const opening = routeToTab(place, new LiveLearning(policy), h.api);
+  assert.equal(queried, true);
+  release([{ id: 1, focused: true }]);
+  assert.deepEqual(await opening, { result: 'focused' });
+  assert.deepEqual(h.calls, []);
+});
+
+test('external opens need no last-focused query when only one eligible window remains', async () => {
+  for (const windows of [
+    [{ id: 1, focused: false, state: 'normal' }],
+    [{ id: 1, focused: false, state: 'minimized' }],
+    [{ id: 1, focused: false, state: 'normal' }, { id: 2, state: 'minimized' }],
+    [{ id: 1, focused: false, state: 'normal' }, { id: 2, incognito: true }],
+  ]) {
+    const h = browser([{ url: photo, active: true }], windows);
+    h.api.windows.getLastFocused = () => { throw new Error('Unnecessary last-focused query'); };
+    assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api), { result: 'focused' });
+    assert.equal(h.calls.some(call => call[0] === 'create'), false);
+  }
+});
+
+test('opening with no browser windows creates one without a last-focused query', async () => {
+  const h = browser([], []);
+  h.api.windows.getLastFocused = () => { throw new Error('No eligible windows'); };
+  assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api), { result: 'opened' });
+  assert.equal(h.calls[0][0], 'create-window');
+});
+
+test('a tab that navigates during concurrent window lookup still fails final revalidation', async () => {
+  const h = browser([{ url: photo, active: false }]);
+  let release;
+  h.api.windows.getAll = () => new Promise(resolve => { release = resolve; });
+  const opening = routeToTab(place, new LiveLearning(policy), h.api);
+  h.tabs[0].url = 'https://unrelated.test/';
+  release([{ id: 1, focused: true }]);
+  await assert.rejects(opening, /matching tab changed/);
+  assert.deepEqual(h.calls, []);
+});
+
 test('expired external requests cannot focus or create a tab', async () => {
   for (const tabs of [[], [{ url: 'https://example.test/item', active: false }]]) {
     const h = browser(tabs);
@@ -333,6 +380,48 @@ test('expired external requests cannot focus or create a tab', async () => {
       { deadline: Date.now() - 1 }), /expired/);
     assert.deepEqual(h.calls, []);
   }
+});
+
+test('creation waits for transport authorization, while existing-tab reuse needs none', async () => {
+  const h = browser([]);
+  let release;
+  const opening = routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
+    beforeCreate: () => new Promise(resolve => { release = resolve; }),
+  });
+  await new Promise(setImmediate);
+  assert.deepEqual(h.calls, []);
+  release();
+  assert.deepEqual(await opening, { result: 'opened' });
+  assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
+  h.calls.length = 0;
+  assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
+    beforeCreate() { throw new Error('Reuse must not request creation authorization'); },
+  }), { result: 'focused' });
+  assert.equal(h.calls.some(call => call[0] === 'create'), false);
+});
+
+test('lost creation authorization cannot create a tab or window', async () => {
+  for (const windows of [[{ id: 1, focused: true }], []]) {
+    const h = browser([], windows);
+    await assert.rejects(routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
+      beforeCreate() { throw new Error('Connection ended'); },
+    }), /Connection ended/);
+    assert.deepEqual(h.calls, []);
+  }
+});
+
+test('a request that expires while waiting for creation authorization cannot mutate tabs', async context => {
+  let now = 1000, release;
+  context.mock.method(Date, 'now', () => now);
+  const h = browser([]);
+  const opening = assert.rejects(routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
+    deadline: 1020, beforeCreate: () => new Promise(resolve => { release = resolve; }),
+  }), /expired/);
+  await new Promise(setImmediate);
+  now = 1021;
+  release();
+  await opening;
+  assert.deepEqual(h.calls, []);
 });
 
 test('an external request that expires behind another open is rejected at the mutation boundary', async context => {
@@ -674,6 +763,31 @@ test('a missing helper has four bounded reconnect attempts without permanent pol
   assert.equal(connections, 5);
   assert.equal(pending.size, 0);
   assert.match(bridge.lastError, /Could not reconnect/);
+});
+
+test('Safari recovery starts immediately without resetting its retry budget on logical readiness', async context => {
+  const pending = timers(context), ports = [];
+  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
+    connectPort: () => {
+      const port = nativePort();
+      port.transportConnected = false;
+      port.authorizeCreation = async () => {};
+      ports.push(port);
+      return port;
+    } });
+  clearTimeout(bridge.timer);
+  await bridge.connect();
+  for (const delay of [0, 5000, 10000, 20000]) {
+    ports.at(-1).disconnect();
+    const [[id, retry]] = pending;
+    assert.equal(retry.delay, delay);
+    pending.delete(id);
+    retry.fn();
+    await new Promise(setImmediate);
+  }
+  ports.at(-1).disconnect();
+  assert.equal(ports.length, 5);
+  assert.equal(pending.size, 0);
 });
 
 test('a newer installed helper requests a reload before routing another link', async () => {

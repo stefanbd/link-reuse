@@ -31,7 +31,7 @@ actor SafariBridge {
         self.version = version
         self.wake = wake
         let parameters = NWParametersBuilder.parameters {
-            WebSocket { TCP() }.maximumMessageSize(1_048_576).autoReplyPing(true)
+            WebSocket { TCP().noDelay(true) }.maximumMessageSize(1_048_576).autoReplyPing(true)
         }
         parameters.parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         parameters.parameters.acceptLocalOnly = true
@@ -88,10 +88,12 @@ actor SafariBridge {
 
     private func deliver(_ message: BridgeMessage) async throws {
         if let (profile, client) = clients.filter({ $0.value.authenticated }).max(by: { $0.value.activity < $1.value.activity }), let id = message.id {
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: channel")
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: channel \(id, privacy: .public)")
             if await exchange.claim(id, profile: profile) {
-                try await send(message, to: client.connection)
-                Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: sent")
+                do {
+                    try await send(message, to: client.connection)
+                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: sent")
+                } catch { await disconnected(profile, connection: client.connection) }
             }
         } else {
             try await extensionReady()
@@ -129,6 +131,7 @@ actor SafariBridge {
             if hello.result == "active" { activity += 1 }
             clients[identity]?.authenticated = true
             clients[identity]?.activity = hello.result == "active" ? activity : 0
+            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: authenticated")
             for request in await exchange.unclaimed() {
                 if let id = request.id, await exchange.claim(id, profile: identity) { try await send(request, to: connection) }
             }
@@ -143,6 +146,16 @@ actor SafariBridge {
                           ["focused", "opened"].contains(message.result ?? "") || message.error != nil else { throw POSIXError(.EINVAL) }
                     message.profile = identity
                     _ = await exchange.receive(message)
+                case "authorize-create":
+                    guard let id = message.id, UUID(uuidString: id) != nil else { throw POSIXError(.EINVAL) }
+                    let accepted = await exchange.authorizeCreation(id, profile: identity)
+                    try await send(BridgeMessage(type: "create-authorized", id: id,
+                        error: accepted ? nil : "The external request is no longer available."), to: connection)
+                case "diagnostic":
+                    guard let reason = message.result,
+                          ["core", "version", "queue", "message", "socket-error", "socket-close", "unavailable", "bootstrap"].contains(reason),
+                          let rawCode = message.error, let code = Int(rawCode), (0...4999).contains(code) else { throw POSIXError(.EINVAL) }
+                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari browser ended: \(reason, privacy: .public) \(code)")
                 default: throw POSIXError(.EINVAL)
                 }
             }
@@ -150,9 +163,14 @@ actor SafariBridge {
             let failure = error as NSError
             Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari channel ended: \(failure.domain, privacy: .public) \(failure.code)")
         }
-        clients.removeValue(forKey: identity)
-        await exchange.finish(profile: identity)
+        await disconnected(identity, connection: connection)
+    }
+
+    private func disconnected(_ identity: String, connection: NetworkConnection<WebSocket>) async {
+        guard clients.removeValue(forKey: identity) != nil else { return }
+        let retryable = await exchange.disconnected(profile: identity)
         if connection.state == .ready { try? await connection.close() }
+        if retryable { try? await extensionReady() }
     }
 
     private static func read(_ connection: NetworkConnection<WebSocket>) async throws -> BridgeMessage {
@@ -171,7 +189,9 @@ actor SafariBridge {
                 switch opcode {
                 case .ping, .pong:
                     Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").debug("Safari control frame bytes: \(payload.count)")
-                case .close: throw POSIXError(.EPIPE)
+                case .close:
+                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari close frame: \(String(describing: frame.metadata.closeCode), privacy: .public)")
+                    throw POSIXError(.EPIPE)
                 case .text: result = try JSONDecoder().decode(BridgeMessage.self, from: payload)
                 default: throw POSIXError(.EINVAL)
                 }

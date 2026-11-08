@@ -1,4 +1,4 @@
-export function safariTransport({ automatic = true } = {}) {
+export function safariTransport({ automatic = true, serverVersion = '3.2.4', authorize = true } = {}) {
   const callbacks = { message: [], disconnect: [] }, sockets = [], sent = [], early = [];
   let disconnected = 0, nativeCalls = 0;
   const descriptor = { type: 'connect', endpoint: 'ws://127.0.0.1:32123/', token: Buffer.alloc(32, 7).toString('base64') };
@@ -12,9 +12,10 @@ export function safariTransport({ automatic = true } = {}) {
       if (this.readyState !== 1) throw new Error('Closed socket');
       const message = JSON.parse(text); sent.push(message);
       if (message.type === 'hello') queueMicrotask(() => {
-        this.emit({ type: 'ready', extensionVersion: '3.2.4' });
+        this.emit({ type: 'ready', extensionVersion: serverVersion });
         for (const frame of early.splice(0)) this.emit(frame);
       });
+      if (message.type === 'authorize-create' && authorize) queueMicrotask(() => this.emit({ type: 'create-authorized', id: message.id }));
     }
     emit(message) { this.onmessage?.({ data: JSON.stringify(message) }); }
     close() { if (this.readyState === 3) return; this.readyState = 3; this.onclose?.({ code: 1000 }); }

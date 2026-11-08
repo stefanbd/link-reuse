@@ -38,6 +38,8 @@ class PackagingTests(unittest.TestCase):
                 self.assertEqual(manifests[1]['background']['page'], 'background.html')
                 self.assertTrue(manifests[1]['background']['persistent'])
                 infos = [plistlib.loads((build.BUILD / (name + '-info.plist')).read_bytes()) for name in ['app', 'safari']]
+                self.assertTrue(infos[0]['LSBackgroundOnly'])
+                self.assertNotIn('LSUIElement', infos[0])
                 self.assertEqual(infos[0]['CFBundleShortVersionString'], infos[1]['CFBundleShortVersionString'])
                 for info in infos:
                     self.assertNotIn('LinkReuseAppGroup', info)

@@ -1,21 +1,23 @@
-export function prepareNative(api, Socket = globalThis.WebSocket) {
+export function prepareNative(api, Socket = globalThis.WebSocket, extensionVersion) {
   if (!api.runtime.getURL('').startsWith('safari-web-extension:')) return () => connectNative(api);
-  let prepared = connectNative(api, Socket);
+  extensionVersion ??= api.runtime.getManifest().version;
+  let prepared = connectNative(api, Socket, extensionVersion);
   return () => {
-    if (prepared.closed) prepared = connectNative(api, Socket);
+    if (prepared.closed) prepared = connectNative(api, Socket, extensionVersion);
     return prepared;
   };
 }
 
-export function connectNative(api, Socket = globalThis.WebSocket) {
+export function connectNative(api, Socket = globalThis.WebSocket, extensionVersion) {
   if (!api.runtime.getURL('').startsWith('safari-web-extension:')) {
     const port = api.runtime.connectNative('me.dichev.link_reuse');
     port.onDisconnect.addListener(() => { void api.runtime.lastError; });
     return port;
   }
+  extensionVersion ??= api.runtime.getManifest().version;
   const incoming = api.runtime.connectNative('me.dichev.LinkReuse');
-  const messages = new Set(), disconnects = new Set(), queued = [];
-  let socket, authenticated = false, ready = false, closed = false, nativeVersion = api.runtime.getManifest().version;
+  const messages = new Set(), disconnects = new Set(), queued = [], authorizations = new Map();
+  let socket, authenticated = false, ready = false, closed = false, nativeVersion = extensionVersion;
   function emit(message) { for (const listener of messages) listener(message); }
   function flush() {
     if (closed || !ready || !authenticated || !messages.size) return;
@@ -35,7 +37,7 @@ export function connectNative(api, Socket = globalThis.WebSocket) {
       previous?.close();
       current.onopen = () => {
         if (closed || socket !== current || current.readyState !== 1) return;
-        current.send(JSON.stringify({ type: 'hello', token: message.token, extensionVersion: api.runtime.getManifest().version }));
+        current.send(JSON.stringify({ type: 'hello', token: message.token, extensionVersion }));
         void api.windows.getAll({ windowTypes: ['normal'] }).then(windows => {
           if (!closed && socket === current && current.readyState === 1 && windows.some(window => window.focused && !window.incognito)) {
             current.send(JSON.stringify({ type: 'activity' }));
@@ -48,13 +50,21 @@ export function connectNative(api, Socket = globalThis.WebSocket) {
           if (typeof event.data !== 'string' || event.data.length > 1048576) throw new Error('Invalid frame');
           const value = JSON.parse(event.data);
           if (value.type === 'ready') {
-            if (value.extensionVersion !== api.runtime.getManifest().version) {
+            if (value.extensionVersion !== extensionVersion) {
               nativeVersion = value.extensionVersion;
               if (ready) { emit(value); port.disconnect('version'); }
               return;
             }
             authenticated = true;
             flush();
+          } else if (authenticated && value.type === 'create-authorized' && typeof value.id === 'string') {
+            const waiting = authorizations.get(value.id);
+            authorizations.delete(value.id);
+            if (waiting) {
+              clearTimeout(waiting.timer);
+              if (value.error) waiting.reject(new Error(value.error));
+              else waiting.resolve();
+            }
           } else if (authenticated && value.type === 'open' && typeof value.id === 'string' && typeof value.url === 'string') {
             if (queued.length >= 16) { port.disconnect('queue'); return; }
             queued.push(value);
@@ -63,10 +73,10 @@ export function connectNative(api, Socket = globalThis.WebSocket) {
         } catch { port.disconnect('message', typeof event.data === 'string' ? 0 : 1); }
       };
       current.onerror = () => {
-        if (socket === current && nativeVersion === api.runtime.getManifest().version) port.disconnect('socket-error');
+        if (socket === current && nativeVersion === extensionVersion) port.disconnect('socket-error');
       };
       current.onclose = event => {
-        if (socket === current && nativeVersion === api.runtime.getManifest().version) port.disconnect('socket-close', event.code);
+        if (socket === current && nativeVersion === extensionVersion) port.disconnect('socket-close', event.code);
       };
     } catch {}
   }
@@ -78,20 +88,43 @@ export function connectNative(api, Socket = globalThis.WebSocket) {
     disconnect(reason = 'core', code = 0) {
       if (closed) return;
       closed = true;
-      const diagnostic = api.runtime.sendNativeMessage('me.dichev.LinkReuse',
-        { type: 'diagnostic', result: reason, error: String(code) });
+      const report = { type: 'diagnostic', result: reason, error: String(code) };
+      let diagnostic;
+      if (authenticated && socket?.readyState === 1) {
+        try { socket.send(JSON.stringify(report)); diagnostic = Promise.resolve(); }
+        catch { diagnostic = api.runtime.sendNativeMessage('me.dichev.LinkReuse', report); }
+      } else diagnostic = api.runtime.sendNativeMessage('me.dichev.LinkReuse', report);
       authenticated = false;
       queued.length = 0;
+      for (const waiting of authorizations.values()) {
+        clearTimeout(waiting.timer);
+        waiting.reject(new Error('The Safari connection ended before the tab operation.'));
+      }
+      authorizations.clear();
       socket?.close();
       void diagnostic.catch(() => {}).finally(() => incoming.disconnect());
       for (const listener of disconnects) listener();
+    },
+    authorizeCreation(id, deadline) {
+      if (closed || !authenticated || socket?.readyState !== 1) return Promise.reject(new Error('The Safari connection ended before the tab operation.'));
+      if (!Number.isFinite(deadline) || deadline <= Date.now()) return Promise.reject(new Error('The external request expired. Please open the link again.'));
+      if (authorizations.has(id) || authorizations.size >= 16) return Promise.reject(new Error('The tab operation is already pending.'));
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          authorizations.delete(id);
+          reject(new Error('The external request expired. Please open the link again.'));
+        }, deadline - Date.now());
+        authorizations.set(id, { resolve, reject, timer });
+        try { socket.send(JSON.stringify({ type: 'authorize-create', id })); }
+        catch (error) { clearTimeout(timer); authorizations.delete(id); reject(error); }
+      });
     },
     postMessage(message) {
       if (closed) throw new Error('The Safari connection ended.');
       if (message.type === 'hello') {
         ready = true;
         emit({ type: 'ready', extensionVersion: nativeVersion });
-        if (nativeVersion !== api.runtime.getManifest().version) { port.disconnect('version'); return; }
+        if (nativeVersion !== extensionVersion) { port.disconnect('version'); return; }
         flush();
       } else if (authenticated && socket?.readyState === 1) {
         socket.send(JSON.stringify(message));
@@ -105,11 +138,7 @@ export function connectNative(api, Socket = globalThis.WebSocket) {
   incoming.onMessage.addListener(message => {
     if (!closed && message?.name === 'link-reuse' && message.userInfo?.type === 'connect') connect(message.userInfo);
   });
-  void api.runtime.sendNativeMessage('me.dichev.LinkReuse', { type: 'hello' }).then(message => {
-    if (!closed && message?.extensionVersion && message.extensionVersion !== api.runtime.getManifest().version) {
-      nativeVersion = message.extensionVersion;
-      if (ready) { emit(message); port.disconnect('version'); }
-    }
-  }).catch(() => {});
+  // Bootstrap replies can arrive late; only the authenticated channel owns native compatibility.
+  void api.runtime.sendNativeMessage('me.dichev.LinkReuse', { type: 'hello' }).catch(() => {});
   return port;
 }

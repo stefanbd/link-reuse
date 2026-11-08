@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install or replace the Mac app, preserving a rollback copy and router settings."""
 import argparse
+import ctypes
 import datetime
 import os
 import pathlib
@@ -14,9 +15,29 @@ ROOT = pathlib.Path(__file__).resolve().parent
 APP = pathlib.Path.home() / 'Applications/Link Reuse.app'
 BACKUPS = pathlib.Path.home() / 'Library/Application Support/Link Reuse/Backups'
 REGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+RENAME_SWAP = 0x00000002
 
 
 def run(*args): subprocess.run(list(map(str, args)), check=True)
+
+
+def register(app):
+    run(REGISTER, '-f', '-R', '-trusted', app)
+
+
+def unregister(app):
+    result = subprocess.run([REGISTER, '-u', str(app)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if result.returncode and '-10814' not in result.stdout:
+        raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout)
+
+
+def swap_contents(left, right):
+    swap = ctypes.CDLL(None, use_errno=True).renamex_np
+    swap.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    swap.restype = ctypes.c_int
+    if swap(os.fsencode(left), os.fsencode(right), RENAME_SWAP):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
 
 
 def stop_owned_processes():
@@ -43,42 +64,49 @@ def main():
     run('codesign', '--verify', '--deep', '--strict', args.app)
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     APP.parent.mkdir(exist_ok=True)
-    stage = APP.parent / ('.Link Reuse update ' + stamp + '.app')
     backup = BACKUPS / stamp
-    old = backup / 'Link Reuse.app'
-    shutil.copytree(args.app, stage, symlinks=True)
+    work = backup / '.install'
+    stage = work / 'Link Reuse.app'
+    archive = backup / 'Link Reuse.zip'
+    work.mkdir(parents=True, mode=0o700)
+    replacing = APP.exists()
+    installed = False
     try:
+        shutil.copytree(args.app, stage, symlinks=True)
         run('codesign', '--verify', '--deep', '--strict', stage)
+        if replacing:
+            run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', APP, archive)
+            with zipfile.ZipFile(archive) as saved:
+                if saved.testzip() is not None: raise RuntimeError('The rollback archive is damaged.')
         stop_owned_processes()
-        if APP.exists():
-            backup.mkdir(parents=True, mode=0o700)
-            APP.rename(old)
         try:
-            stage.rename(APP)
-            run(APP / 'Contents/MacOS/LinkReuse', '--install')
-            run(REGISTER, '-f', APP)
-            run('pluginkit', '-a', APP / 'Contents/PlugIns/LinkReuseSafari.appex')
+            if replacing: swap_contents(APP / 'Contents', stage / 'Contents')
+            else: stage.rename(APP)
+            installed = True
             run('codesign', '--verify', '--deep', '--strict', APP)
-            if old.exists():
-                archive = backup / 'Link Reuse.zip'
-                run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', old, archive)
-                with zipfile.ZipFile(archive) as saved:
-                    if saved.testzip() is not None: raise RuntimeError('The rollback archive is damaged.')
-                shutil.rmtree(old)
+            shutil.rmtree(work)
+            run(APP / 'Contents/MacOS/LinkReuse', '--install')
+            register(APP)
         except BaseException:
-            backup.mkdir(parents=True, exist_ok=True)
-            if APP.exists(): APP.rename(backup / 'Failed update.app')
-            if old.exists():
-                old.rename(APP)
+            if installed and replacing:
+                if not stage.exists():
+                    work.mkdir(parents=True, mode=0o700)
+                    run('ditto', '-x', '-k', archive, work)
+                swap_contents(APP / 'Contents', stage / 'Contents')
+                shutil.rmtree(work)
                 run(APP / 'Contents/MacOS/LinkReuse', '--install')
-                run(REGISTER, '-f', APP)
+                register(APP)
+            elif installed:
+                unregister(APP)
+                work.mkdir(parents=True, exist_ok=True, mode=0o700)
+                APP.rename(stage)
             raise
     finally:
-        if stage.exists(): shutil.rmtree(stage)
+        if work.exists(): shutil.rmtree(work)
     shortcut = APP.parent / 'Link Reuse Extension'
     if not shortcut.exists() and not shortcut.is_symlink(): shortcut.symlink_to(APP / 'Contents/Resources/extension', target_is_directory=True)
     print('Installed:', APP)
-    if backup.exists(): print('Rollback copy:', backup / 'Link Reuse.zip')
+    if archive.exists(): print('Rollback copy:', archive)
     print('Enable Link Reuse in Safari Settings → Extensions. Reload it in Chromium browsers.')
 
 

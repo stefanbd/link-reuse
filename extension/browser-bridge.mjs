@@ -52,15 +52,17 @@ export class BrowserBridge {
             return;
           }
           this.connected = true;
-          this.reconnectAttempts = 0;
+          if (port.transportConnected !== false) this.reconnectAttempts = 0;
           clearTimeout(this.reconnectTimer);
           this.lastError = '';
           this.badge('');
           resolve();
         }
         if (message.type === 'open' && typeof message.id === 'string') {
+          this.reconnectAttempts = 0;
           if (!this.connected) { port.postMessage({ type: 'result', id: message.id, error: this.lastError || 'The extension is still connecting.' }); return; }
-          void this.open(message.url, { deadline: message.deadline }, port).then(result => {
+          void this.open(message.url, { deadline: message.deadline,
+            beforeCreate: port.authorizeCreation ? () => port.authorizeCreation(message.id, message.deadline) : undefined }, port).then(result => {
             if (this.port === port) port.postMessage({ type: 'result', id: message.id, ...result });
           }, error => {
             if (this.port === port) port.postMessage({ type: 'result', id: message.id, error: error.message });
@@ -72,7 +74,8 @@ export class BrowserBridge {
         clearTimeout(timeout);
         this.port = undefined;
         this.connected = false;
-        const delay = Math.min(5000 * 2 ** this.reconnectAttempts, 20000);
+        const attempt = this.reconnectAttempts - (port.authorizeCreation ? 1 : 0);
+        const delay = attempt < 0 ? 0 : Math.min(5000 * 2 ** attempt, 20000);
         this.retryAt = Date.now() + delay;
         this.lastError = this.reconnectAttempts < 4 ? 'Browser helper disconnected. Reconnecting automatically…' :
           'Could not reconnect to the browser helper. ' + (this.platform === 'mac' ?

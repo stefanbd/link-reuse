@@ -8,6 +8,7 @@ import pathlib
 import plistlib
 import shutil
 import subprocess
+from install import unregister
 
 ROOT = pathlib.Path(__file__).resolve().parent
 BUILD = ROOT / 'build'
@@ -48,7 +49,7 @@ def prepare():
             'LSMinimumSystemVersion': '26.0',
         }
         if name == 'app':
-            info['LSUIElement'] = True
+            info['LSBackgroundOnly'] = True
             info['CFBundleURLTypes'] = [{'CFBundleURLName': 'Link Reuse request', 'CFBundleTypeRole': 'Viewer', 'CFBundleURLSchemes': ['linkreuse']}]
         else:
             info['NSExtension'] = {'NSExtensionPointIdentifier': 'com.apple.Safari.web-extension',
@@ -65,28 +66,32 @@ def main():
     parser.add_argument('--sign', default='-', help='Code-signing identity; defaults to ad-hoc development signing.')
     args = parser.parse_args()
     extension_id = prepare()
+    if APP.exists(): unregister(APP)
     for product in [APP, BUILD / 'LinkReuseSafari.appex']:
         if product.exists(): shutil.rmtree(product)
-    subprocess.run(['xcodebuild', '-project', str(ROOT / 'LinkReuse.xcodeproj'), '-scheme', 'Link Reuse',
-                    '-configuration', 'Release', '-destination', 'generic/platform=macOS', '-derivedDataPath', str(BUILD / 'derived'),
-                    'ARCHS=arm64 x86_64', 'ONLY_ACTIVE_ARCH=NO', 'CODE_SIGNING_ALLOWED=NO',
-                    'CONFIGURATION_BUILD_DIR=' + str(BUILD), '-quiet', 'build'], check=True, cwd=ROOT)
-    for name, destination in [('app', APP / 'Contents/Resources'),
-                              ('safari', APP / 'Contents/PlugIns/LinkReuseSafari.appex/Contents/Resources')]:
-        expected = {p.relative_to(BUILD / (name + '-resources')): p.read_bytes() for p in (BUILD / (name + '-resources')).rglob('*') if p.is_file()}
-        actual = {p.relative_to(destination): p.read_bytes() for p in destination.rglob('*') if p.is_file()}
-        if expected != actual: raise RuntimeError(name + ' extension resources differ from the prepared shared source')
-    main_binary = APP / 'Contents/MacOS/LinkReuse'
-    host = APP / 'Contents/Helpers/LinkReuseHost'
-    host.parent.mkdir(exist_ok=True)
-    shutil.copy2(main_binary, host)
-    signing = ['codesign', '--force', '--sign', args.sign, '--timestamp=none']
-    subprocess.run([*signing, '--identifier', 'me.dichev.LinkReuse.Host', str(host)], check=True)
-    extension = APP / 'Contents/PlugIns/LinkReuseSafari.appex'
-    subprocess.run([*signing, '--entitlements', str(BUILD / 'safari.entitlements'), str(extension)], check=True)
-    subprocess.run([*signing, '--entitlements', str(BUILD / 'app.entitlements'), str(APP)], check=True)
-    subprocess.run(['codesign', '--verify', '--deep', '--strict', str(APP)], check=True)
-    subprocess.run([str(host), '--self-test'], check=True)
+    try:
+        subprocess.run(['xcodebuild', '-project', str(ROOT / 'LinkReuse.xcodeproj'), '-scheme', 'Link Reuse',
+                        '-configuration', 'Release', '-destination', 'generic/platform=macOS', '-derivedDataPath', str(BUILD / 'derived'),
+                        'ARCHS=arm64 x86_64', 'ONLY_ACTIVE_ARCH=NO', 'CODE_SIGNING_ALLOWED=NO',
+                        'CONFIGURATION_BUILD_DIR=' + str(BUILD), '-quiet', 'build'], check=True, cwd=ROOT)
+        for name, destination in [('app', APP / 'Contents/Resources'),
+                                  ('safari', APP / 'Contents/PlugIns/LinkReuseSafari.appex/Contents/Resources')]:
+            expected = {p.relative_to(BUILD / (name + '-resources')): p.read_bytes() for p in (BUILD / (name + '-resources')).rglob('*') if p.is_file()}
+            actual = {p.relative_to(destination): p.read_bytes() for p in destination.rglob('*') if p.is_file()}
+            if expected != actual: raise RuntimeError(name + ' extension resources differ from the prepared shared source')
+        main_binary = APP / 'Contents/MacOS/LinkReuse'
+        host = APP / 'Contents/Helpers/LinkReuseHost'
+        host.parent.mkdir(exist_ok=True)
+        shutil.copy2(main_binary, host)
+        signing = ['codesign', '--force', '--sign', args.sign, '--timestamp=none']
+        subprocess.run([*signing, '--identifier', 'me.dichev.LinkReuse.Host', str(host)], check=True)
+        extension = APP / 'Contents/PlugIns/LinkReuseSafari.appex'
+        subprocess.run([*signing, '--entitlements', str(BUILD / 'safari.entitlements'), str(extension)], check=True)
+        subprocess.run([*signing, '--entitlements', str(BUILD / 'app.entitlements'), str(APP)], check=True)
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', str(APP)], check=True)
+        subprocess.run([str(host), '--self-test'], check=True)
+    finally:
+        if APP.exists(): unregister(APP)
     print('Built one Link Reuse.app with Safari and Chromium support.')
     print('Stable Chromium extension ID:', extension_id)
 

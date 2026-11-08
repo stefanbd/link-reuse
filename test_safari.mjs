@@ -63,7 +63,53 @@ test('Safari learning is ready without launching the routing app', () => {
   port.disconnect();
 });
 
-test('Safari retains an early native-version reply until the shared engine can reload', async () => {
+test('Safari creation waits for authorization on the existing socket without an Apple RPC', async () => {
+  const h = safariTransport({ authorize: false }), port = connectNative(h.api, h.Socket);
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  let authorized = false;
+  const pending = port.authorizeCreation('request', Date.now() + 10_000).then(() => { authorized = true; });
+  await new Promise(setImmediate);
+  assert.equal(authorized, false);
+  assert.deepEqual(h.sent.at(-1), { type: 'authorize-create', id: 'request' });
+  h.emit({ type: 'create-authorized', id: 'unrelated' });
+  assert.equal(authorized, false);
+  h.emit({ type: 'create-authorized', id: 'request' });
+  await pending;
+  assert.equal(authorized, true);
+  assert.equal(h.nativeCalls, 1);
+  port.disconnect();
+});
+
+test('Safari rejects pending creation on disconnect and ignores a late authorization', async () => {
+  const h = safariTransport({ authorize: false }), port = connectNative(h.api, h.Socket);
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  const pending = assert.rejects(port.authorizeCreation('request', Date.now() + 10_000), /connection ended/);
+  h.sockets[0].close();
+  await pending;
+  h.emit({ type: 'create-authorized', id: 'request' });
+  await assert.rejects(port.authorizeCreation('request', Date.now() + 10_000), /connection ended/);
+});
+
+test('Safari authorization uses the original request deadline and discards a late grant', async context => {
+  let now = 1000, expire;
+  context.mock.method(Date, 'now', () => now);
+  context.mock.method(globalThis, 'setTimeout', (fn, delay) => { assert.equal(delay, 20); expire = fn; return 1; });
+  context.mock.method(globalThis, 'clearTimeout', () => {});
+  const h = safariTransport({ authorize: false }), port = connectNative(h.api, h.Socket);
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  const pending = assert.rejects(port.authorizeCreation('request', 1020), /expired/);
+  now = 1021;
+  expire();
+  await pending;
+  h.emit({ type: 'create-authorized', id: 'request' });
+  await assert.rejects(port.authorizeCreation('expired', 1020), /expired/);
+  port.disconnect();
+});
+
+test('Safari ignores bootstrap version hints and uses the authenticated channel version', async () => {
   const h = safariTransport({ automatic: false });
   h.api.runtime.sendNativeMessage = async () => ({ type: 'ready', extensionVersion: '3.2.5' });
   const connect = prepareNative(h.api, h.Socket);
@@ -71,7 +117,58 @@ test('Safari retains an early native-version reply until the shared engine can r
   const port = connect(), messages = [];
   port.onMessage.addListener(message => messages.push(message));
   port.postMessage({ type: 'hello' });
+  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.4' }]);
+  assert.equal(port.closed, false);
+  h.wake();
+  await new Promise(setImmediate);
+  assert.equal(port.transportConnected, true);
+  port.disconnect();
+});
+
+test('a delayed bootstrap reply cannot close an already authenticated matching channel', async () => {
+  const h = safariTransport();
+  let release;
+  h.api.runtime.sendNativeMessage = () => new Promise(resolve => { release = resolve; });
+  const port = connectNative(h.api, h.Socket), messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  assert.equal(port.transportConnected, true);
+  release({ type: 'ready', extensionVersion: '3.2.3' });
+  await new Promise(setImmediate);
+  assert.equal(port.closed, false);
+  assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.4' }]);
+  h.emit({ type: 'open', id: 'after-late-bootstrap', url: 'https://example.test/item' });
+  assert.equal(messages.at(-1).id, 'after-late-bootstrap');
+  port.disconnect();
+});
+
+test('Safari retains an early channel version mismatch until the engine can reload', async () => {
+  const h = safariTransport({ serverVersion: '3.2.5' });
+  const connect = prepareNative(h.api, h.Socket);
+  await new Promise(setImmediate);
+  const port = connect(), messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
   assert.deepEqual(messages, [{ type: 'ready', extensionVersion: '3.2.5' }]);
+  assert.equal(port.closed, true);
+});
+
+test('Safari keeps its context version when manifest metadata changes during an update', async () => {
+  const h = safariTransport({ automatic: false });
+  let version = '3.2.4';
+  h.api.runtime.getManifest = () => ({ version });
+  const connect = prepareNative(h.api, h.Socket);
+  const port = connect(), messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  version = '3.2.5';
+  h.wake();
+  await new Promise(setImmediate);
+  assert.equal(h.sent.find(message => message.type === 'hello').extensionVersion, '3.2.4');
+  assert.equal(port.transportConnected, true);
+  h.emit({ type: 'ready', extensionVersion: '3.2.5' });
+  assert.equal(messages.at(-1).extensionVersion, '3.2.5');
   assert.equal(port.closed, true);
 });
 

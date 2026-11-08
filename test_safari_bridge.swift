@@ -96,9 +96,24 @@ struct SafariBridgeTests {
         } catch {}
 
         let interrupted = Task { try await bridge.open("https://example.test/interrupted") }
-        _ = try await receive(socket)
+        let interruptedMessage = try await receive(socket)
         try await socket.close(code: .protocolCode(.goingAway))
-        do { _ = try await interrupted.value; preconditionFailure("Disconnected request survived") }
+        let recoveryDescriptor = await deliveries.next()
+        let recoveredSocket = try await connect(recoveryDescriptor)
+        _ = try await receive(recoveredSocket)
+        let replay = try await receive(recoveredSocket)
+        precondition(replay.id == interruptedMessage.id && replay.deadline == interruptedMessage.deadline)
+        try await send(BridgeMessage(type: "result", id: replay.id, result: "focused"), to: recoveredSocket)
+        let recoveredResult = try await interrupted.value
+        precondition(recoveredResult == "focused")
+
+        let uncertain = Task { try await bridge.open("https://example.test/uncertain") }
+        let creation = try await receive(recoveredSocket)
+        try await send(BridgeMessage(type: "authorize-create", id: creation.id), to: recoveredSocket)
+        let authorization = try await receive(recoveredSocket)
+        precondition(authorization.type == "create-authorized" && authorization.id == creation.id && authorization.error == nil)
+        try await recoveredSocket.close(code: .protocolCode(.goingAway))
+        do { _ = try await uncertain.value; preconditionFailure("Authorized creation was replayed") }
         catch let error as POSIXError { precondition(error.code == .EPIPE) }
         for _ in 0..<18 {
             let replacement = try await connect(descriptor)

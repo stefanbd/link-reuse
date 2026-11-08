@@ -6,6 +6,7 @@ actor BridgeExchange {
         let continuation: CheckedContinuation<BridgeMessage, Error>
         let message: BridgeMessage
         var profile: String?
+        var creationAuthorized = false
     }
 
     private let deliver: @Sendable (BridgeMessage) async throws -> Void
@@ -41,6 +42,14 @@ actor BridgeExchange {
         return true
     }
 
+    func authorizeCreation(_ id: String, profile: String) -> Bool {
+        guard var request = pending[id], request.profile == profile, !request.creationAuthorized,
+              (request.message.deadline ?? 0) > Date().timeIntervalSince1970 * 1000 else { return false }
+        request.creationAuthorized = true
+        pending[id] = request
+        return true
+    }
+
     @discardableResult
     func receive(_ message: BridgeMessage) -> Bool {
         guard message.type == "result", let id = message.id, let request = pending[id],
@@ -55,7 +64,13 @@ actor BridgeExchange {
         pending.removeAll()
     }
 
-    func finish(profile: String) {
-        for (id, request) in pending where request.profile == profile { fail(id, error: POSIXError(.EPIPE)) }
+    @discardableResult
+    func disconnected(profile: String) -> Bool {
+        var retryable = false
+        for (id, request) in pending where request.profile == profile {
+            if request.creationAuthorized { fail(id, error: POSIXError(.EPIPE)) }
+            else { pending[id]?.profile = nil; retryable = true }
+        }
+        return retryable
     }
 }
