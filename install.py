@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Install or replace the Mac app, preserving a rollback copy and router settings."""
+"""Install or replace the Mac app, preserving router settings without retaining update artifacts."""
 import argparse
 import ctypes
-import datetime
 import os
 import pathlib
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent
 APP = pathlib.Path.home() / 'Applications/Link Reuse.app'
-BACKUPS = pathlib.Path.home() / 'Library/Application Support/Link Reuse/Backups'
 REGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 RENAME_SWAP = 0x00000002
 
@@ -62,12 +61,12 @@ def main():
     parser.add_argument('--app', type=pathlib.Path, default=ROOT / 'build/Link Reuse.app')
     args = parser.parse_args()
     run('codesign', '--verify', '--deep', '--strict', args.app)
-    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     APP.parent.mkdir(exist_ok=True)
-    backup = BACKUPS / stamp
-    work = backup / '.install'
+    temporary = tempfile.TemporaryDirectory(prefix='.link-reuse-', dir=APP.parent)
+    transaction = pathlib.Path(temporary.name)
+    work = transaction / '.install'
     stage = work / 'Link Reuse.app'
-    archive = backup / 'Link Reuse.zip'
+    archive = transaction / 'rollback.zip'
     work.mkdir(parents=True, mode=0o700)
     replacing = APP.exists()
     installed = False
@@ -102,11 +101,10 @@ def main():
                 APP.rename(stage)
             raise
     finally:
-        if work.exists(): shutil.rmtree(work)
+        temporary.cleanup()
     shortcut = APP.parent / 'Link Reuse Extension'
     if not shortcut.exists() and not shortcut.is_symlink(): shortcut.symlink_to(APP / 'Contents/Resources/extension', target_is_directory=True)
     print('Installed:', APP)
-    if archive.exists(): print('Rollback copy:', archive)
     print('Enable Link Reuse in Safari Settings → Extensions. Reload it in Chromium browsers.')
 
 

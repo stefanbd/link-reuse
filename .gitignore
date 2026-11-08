@@ -1,8 +1,5 @@
 build/
-backups/
 __pycache__/
-/native-host
-/.native-host-install-*/
 .DS_Store
 *.py[cod]
 .env

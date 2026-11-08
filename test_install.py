@@ -5,7 +5,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import zipfile
 from unittest.mock import patch
 import install
 
@@ -23,10 +22,9 @@ class InstallTests(unittest.TestCase):
             def run(*args):
                 calls.append(tuple(map(str, args)))
                 if str(args[0]) == install.REGISTER:
-                    self.assertEqual(list((root / 'Backups').rglob('*.app')), [])
-                if failing and failing(*args): raise subprocess.CalledProcessError(1, args)
+                        if failing and failing(*args): raise subprocess.CalledProcessError(1, args)
                 if str(args[0]) == 'ditto': subprocess.run(list(map(str, args)), check=True)
-            with patch.object(install, 'APP', destination), patch.object(install, 'BACKUPS', root / 'Backups'), \
+            with patch.object(install, 'APP', destination), \
                  patch.object(install, 'stop_owned_processes') as stop, patch.object(install, 'run', side_effect=run), \
                  patch.object(sys, 'argv', ['install.py', '--app', str(source)]):
                 if failing:
@@ -35,16 +33,11 @@ class InstallTests(unittest.TestCase):
                 else:
                     install.main()
                     self.assertEqual((destination / 'Contents/Resources/version').read_text(), 'new')
-                    archive = next((root / 'Backups').glob('*/Link Reuse.zip'))
-                    with zipfile.ZipFile(archive) as saved:
-                        self.assertEqual(saved.read('Link Reuse.app/Contents/Resources/version'), b'old')
-                    self.assertEqual(list((root / 'Backups').glob('*/*.app')), [])
-                self.assertEqual(list(destination.parent.glob('.Link Reuse update*')), [])
+                self.assertEqual(list(destination.parent.glob('.link-reuse-*')), [])
                 self.assertEqual(destination.stat().st_ino, original_inode)
-                self.assertEqual(list((root / 'Backups').glob('*/.install')), [])
                 return calls, stop.call_count
 
-    def test_replacement_keeps_rollback_and_stops_owned_processes(self):
+    def test_replacement_cleans_transaction_and_stops_owned_processes(self):
         calls, stopped = self.attempt()
         self.assertEqual(calls[0][:4], ('codesign', '--verify', '--deep', '--strict'))
         self.assertEqual(stopped, 1)
@@ -70,13 +63,12 @@ class InstallTests(unittest.TestCase):
             destination, source = root / 'Applications/Link Reuse.app', root / 'new.app'
             (source / 'Contents/Resources/extension').mkdir(parents=True)
             (source / 'Contents/Resources/version').write_text('new')
-            with patch.object(install, 'APP', destination), patch.object(install, 'BACKUPS', root / 'Backups'), \
+            with patch.object(install, 'APP', destination), \
                  patch.object(install, 'stop_owned_processes'), patch.object(install, 'run'), \
                  patch.object(sys, 'argv', ['install.py', '--app', str(source)]):
                 install.main()
             self.assertEqual((destination / 'Contents/Resources/version').read_text(), 'new')
-            self.assertEqual(list((root / 'Backups').rglob('*.app')), [])
-            self.assertEqual(list((root / 'Backups').glob('*/.install')), [])
+            self.assertEqual(list(destination.parent.glob('.link-reuse-*')), [])
 
     def test_unregistration_tolerates_only_an_absent_registration(self):
         missing = subprocess.CompletedProcess(['lsregister'], 1, 'failed to scan: -10814\n from spotlight')
