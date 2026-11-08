@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Update only eligible OpenIn browser destinations; preserve rules and a rollback record."""
-import datetime
+"""Update only eligible OpenIn browser destinations; preserve rules in one database transaction."""
+import os
 import json
 import pathlib
 import sqlite3
@@ -22,24 +22,17 @@ mapping.update({f'me.dichev.LinkReuse.{browser["id"]}': browser['id'] for browse
 if '--apply' not in sys.argv:
     raise SystemExit('Run with --apply after the installed app passes its browser checks.')
 
-subprocess.run(['osascript', '-e', 'tell application id "app.loshadki.OpenIn.v4" to quit'], check=True)
+stopped = subprocess.run(['pkill', '-TERM', '-x', '-u', str(os.getuid()), 'OpenIn'])
+if stopped.returncode not in (0, 1): stopped.check_returncode()
 for _ in range(50):
-    if subprocess.run(['pgrep', '-x', 'OpenIn'], capture_output=True).returncode != 0:
+    if subprocess.run(['pgrep', '-x', '-u', str(os.getuid()), 'OpenIn'], capture_output=True).returncode != 0:
         break
     time.sleep(0.1)
 else:
     raise SystemExit('OpenIn is still running; its settings were not changed.')
 
-stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-backup_root = source_root / 'backups' / stamp
-backup_root.mkdir(parents=True, mode=0o700)
 connection = sqlite3.connect(database)
 connection.row_factory = sqlite3.Row
-with sqlite3.connect(backup_root / 'local.sqlite') as backup:
-    connection.backup(backup)
-(backup_root / 'local.sqlite').chmod(0o600)
-
-originals = []
 try:
     connection.execute('BEGIN IMMEDIATE')
     rules_before = list(connection.execute('SELECT * FROM Z_6USEDINRULES ORDER BY Z_6SELECTEDAPPS,Z_7USEDINRULES'))
@@ -58,7 +51,6 @@ try:
             continue
         if row['ZREWRITEURL'] and row['ZREWRITEURLSCRIPTTEXT'] != scripts[short]:
             raise RuntimeError('A selected browser already has a custom rewrite; settings were not changed.')
-        originals.append({key: row[key] for key in ['Z_PK','ZBUNDLEIDENTIFIER','ZPATH','ZLAUNCHACTIVATES','ZREWRITEURL','ZREWRITEURLTYPE','ZREWRITEURLSCRIPTTEXT']})
         connection.execute('''
             UPDATE ZOPENINHANDLERAPP
             SET ZBUNDLEIDENTIFIER=?,ZPATH=?,ZLAUNCHACTIVATES=0,ZREWRITEURL=1,ZREWRITEURLTYPE='Script',ZREWRITEURLSCRIPTTEXT=?,Z_OPT=Z_OPT+1 WHERE Z_PK=?
@@ -68,8 +60,6 @@ try:
     rules_after = list(connection.execute('SELECT * FROM Z_6USEDINRULES ORDER BY Z_6SELECTEDAPPS,Z_7USEDINRULES'))
     assert rules_before == rules_after
     assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-    (backup_root / 'routing-before.json').write_text(json.dumps({'changed': originals}, indent=2))
-    (backup_root / 'routing-before.json').chmod(0o600)
     connection.commit()
 except BaseException:
     connection.rollback()
@@ -78,4 +68,3 @@ finally:
     connection.close()
     subprocess.run(['open', '-g', '-a', '/Applications/OpenIn.app'], check=True)
 
-print(f'Backup: {backup_root}')
