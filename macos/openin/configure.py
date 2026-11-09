@@ -8,7 +8,8 @@ import subprocess
 import sys
 import time
 
-root = pathlib.Path.home() / 'Library/Group Containers/4QE86VV38D.app.loshadki.OpenIn/Library/Application Support/OpenIn'
+root = (pathlib.Path.home() / 'Library/Group Containers/4QE86VV38D.app.loshadki.OpenIn'
+        / 'Library/Application Support/OpenIn')
 database = root / 'local.sqlite'
 source_root = pathlib.Path(__file__).resolve().parent
 app = pathlib.Path.home() / 'Applications/Link Reuse.app'
@@ -53,7 +54,9 @@ try:
             raise RuntimeError('A selected browser already has a custom rewrite; settings were not changed.')
         connection.execute('''
             UPDATE ZOPENINHANDLERAPP
-            SET ZBUNDLEIDENTIFIER=?,ZPATH=?,ZLAUNCHACTIVATES=0,ZREWRITEURL=1,ZREWRITEURLTYPE='Script',ZREWRITEURLSCRIPTTEXT=?,Z_OPT=Z_OPT+1 WHERE Z_PK=?
+            SET ZBUNDLEIDENTIFIER=?, ZPATH=?, ZLAUNCHACTIVATES=0, ZREWRITEURL=1, ZREWRITEURLTYPE='Script',
+                ZREWRITEURLSCRIPTTEXT=?, Z_OPT=Z_OPT+1
+            WHERE Z_PK=?
         ''', ('me.dichev.LinkReuse', app.as_uri(), scripts[short], row['Z_PK']))
         print(f'Updated {row["ZNAME"]} destination (id {row["Z_PK"]})')
 

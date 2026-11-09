@@ -34,18 +34,23 @@ struct AppResources {
         browsers = configuration.browsers
         extensionOrigin = configuration.extensionOrigin
         struct Manifest: Decodable { let version: String }
-        extensionVersion = try JSONDecoder().decode(Manifest.self, from: Data(contentsOf: directory.appending(path: "extension/manifest.json"))).version
+        let manifest = try Data(contentsOf: directory.appending(path: "extension/manifest.json"))
+        extensionVersion = try JSONDecoder().decode(Manifest.self, from: manifest).version
     }
 
     func installNativeMessaging() throws {
         for browser in browsers {
             guard let profilePath = browser.profilePath else { continue }
-            let folder = URL.applicationSupportDirectory.appending(path: profilePath).appending(path: "NativeMessagingHosts")
+            let folder = URL.applicationSupportDirectory.appending(path: profilePath)
+                .appending(path: "NativeMessagingHosts")
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let file = folder.appending(path: "me.dichev.link_reuse.json")
-            let manifest = ["name": "me.dichev.link_reuse", "description": "Route links through the shared Link Reuse extension.",
-                            "path": Self.recorderURL.path, "type": "stdio", "allowed_origins": [extensionOrigin]] as [String: Any]
-            try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: file, options: .atomic)
+            let manifest: [String: Any] = [
+                "name": "me.dichev.link_reuse", "description": "Route links through the shared Link Reuse extension.",
+                "path": Self.recorderURL.path, "type": "stdio", "allowed_origins": [extensionOrigin],
+            ]
+            try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+                .write(to: file, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         }
     }

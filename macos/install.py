@@ -13,8 +13,8 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APP = pathlib.Path.home() / 'Applications/Link Reuse.app'
-# Spotlight skips `.noindex` folders. An indexed build copy gets registered automatically, and two registered
-# copies of the Safari extension make PlugInKit kill it, so Safari reloads every extension mid-request.
+# Builds go in a `.noindex` folder: Spotlight would register an indexed copy, and a second registered Safari extension
+# makes PlugInKit kill the live one, so Safari reloads every extension mid-request.
 BUILT_APP = ROOT / 'build/products.noindex/Link Reuse.app'
 REGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 RENAME_SWAP = 0x00000002
@@ -24,9 +24,8 @@ def run(*args): subprocess.run(list(map(str, args)), check=True)
 
 
 def register(app):
-    # For a few minutes after a bundle changes, every URL open through CoreServicesUIAgent (OpenIn, /usr/bin/open)
-    # re-registers it, and each re-registration makes PlugInKit kill the live Safari extension mid-request.
-    # Dating the folder back takes it out of that window; this explicit registration records the new contents.
+    # For a few minutes after a bundle changes, macOS re-registers it on every link opened through CoreServicesUIAgent
+    # (OpenIn, /usr/bin/open), restarting the Safari extension each time. Dating the folder back avoids that window.
     past = time.time() - 3600
     os.utime(app, (past, past))
     run(REGISTER, '-f', '-R', '-trusted', app)
@@ -111,7 +110,8 @@ def main():
     finally:
         temporary.cleanup()
     shortcut = APP.parent / 'Link Reuse Extension'
-    if not shortcut.exists() and not shortcut.is_symlink(): shortcut.symlink_to(APP / 'Contents/Resources/extension', target_is_directory=True)
+    if not shortcut.exists() and not shortcut.is_symlink():
+        shortcut.symlink_to(APP / 'Contents/Resources/extension', target_is_directory=True)
     print('Installed:', APP)
     print('Enable Link Reuse in Safari Settings → Extensions. Reload it in Chromium browsers.')
 

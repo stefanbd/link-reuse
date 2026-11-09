@@ -39,7 +39,8 @@ export function reuseIndex(tabs, learning) {
     index.get(origin).entries.push([key, shown.get(key)]);
   }
   for (const site of index.values()) {
-    site.signature = JSON.stringify(site.entries.map(([key, ids]) => [key, [...ids].sort((left, right) => left - right)]));
+    const sorted = site.entries.map(([key, ids]) => [key, [...ids].sort((left, right) => left - right)]);
+    site.signature = JSON.stringify(sorted);
   }
   return index;
 }

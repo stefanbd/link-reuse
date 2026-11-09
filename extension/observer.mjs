@@ -1,3 +1,7 @@
+/**
+ * Follows each tab's top-level navigations and reports which addresses led to the page it shows: server redirects,
+ * automatic client-side redirects and address rewrites, until the user interacts with the page.
+ */
 export class RedirectObserver {
   constructor(maxSources = 32) {
     this.maxSources = maxSources;
@@ -10,8 +14,7 @@ export class RedirectObserver {
   }
 
   committed(event) {
-    // A failure report does not end a pending navigation: Safari reports one when a cross-site navigation moves to
-    // another web process and then commits it without a new onBeforeNavigate. The next navigation replaces it anyway.
+    // A start survives a failure report (see failed) for 30 seconds; the next navigation replaces it anyway.
     const reported = this.pending.get(event.tabId);
     const pending = reported && Date.now() - reported.at < 30000 ? reported : undefined;
     const previous = pending?.previous;
@@ -20,8 +23,13 @@ export class RedirectObserver {
       for (const source of previous.sources) sources.add(source);
       sources.add(previous.url);
     }
-    const tab = { sources: [...sources].slice(-this.maxSources), url: event.url, documentId: event.documentId, interacted: false };
-    if (!event.transitionQualifiers && previous && !previous.interacted) tab.redirectFrom = { url: previous.url, sources: previous.sources };
+    const tab = {
+      sources: [...sources].slice(-this.maxSources), url: event.url, documentId: event.documentId, interacted: false,
+    };
+    // Without transition qualifiers (Safari), the new document's referrer decides later whether this was a redirect.
+    if (!event.transitionQualifiers && previous && !previous.interacted) {
+      tab.redirectFrom = { url: previous.url, sources: previous.sources };
+    }
     this.tabs.set(event.tabId, tab);
     this.pending.delete(event.tabId);
     return this.aliases(tab);
@@ -56,8 +64,8 @@ export class RedirectObserver {
     if (tab?.documentId === documentId) tab.interacted = true;
   }
 
-  // A failed navigation leaves the current document. Its pending start stays (see committed), because Safari reports a
-  // cross-site process swap as a failure before the navigation commits.
+  // The current document stays. The pending start does too: Safari reports a cross-site process swap as a failure,
+  // then commits that navigation without a new onBeforeNavigate.
   failed(tabId) {
     this.tabs.delete(tabId);
   }

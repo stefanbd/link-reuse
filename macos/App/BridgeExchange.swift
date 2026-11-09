@@ -24,7 +24,8 @@ actor BridgeExchange {
         }
         defer { timer.cancel() }
         return try await withCheckedThrowingContinuation { continuation in
-            let message = BridgeMessage(type: "open", id: id, url: url, deadline: Date().timeIntervalSince1970 * 1000 + 10_000)
+            let deadline = Date().timeIntervalSince1970 * 1000 + 10_000
+            let message = BridgeMessage(type: "open", id: id, url: url, deadline: deadline)
             pending[id] = Pending(continuation: continuation, message: message)
             Task {
                 do { try await send(message) }

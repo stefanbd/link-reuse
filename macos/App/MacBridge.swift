@@ -31,7 +31,8 @@ enum MacBridge {
 
     static func prepare() throws {
         let manager = FileManager.default
-        try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try manager.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let attributes = try manager.attributesOfItem(atPath: directory.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory,
               (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() else { throw POSIXError(.EPERM) }
@@ -41,11 +42,16 @@ enum MacBridge {
     static func sessions(browser: String, host: URL = AppResources.recorderURL) throws -> [BridgeSession] {
         guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
         try prepare()
-        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.fileSizeKey])
         return files.compactMap { file -> BridgeSession? in
-            guard file.pathExtension == "json", (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max <= 4096,
-                  let data = try? Data(contentsOf: file), let session = try? JSONDecoder().decode(BridgeSession.self, from: data),
-                  UUID(uuidString: session.id) != nil, session.file.lastPathComponent == file.lastPathComponent, session.browser == browser else { return nil }
+            guard file.pathExtension == "json",
+                  (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max <= 4096,
+                  let data = try? Data(contentsOf: file),
+                  let session = try? JSONDecoder().decode(BridgeSession.self, from: data),
+                  UUID(uuidString: session.id) != nil,
+                  session.file.lastPathComponent == file.lastPathComponent,
+                  session.browser == browser else { return nil }
             var buffer = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
             let count = proc_pidpath(session.pid, &buffer, UInt32(buffer.count))
             let path = String(decoding: buffer.prefix(max(0, Int(count))).map { UInt8(bitPattern: $0) }, as: UTF8.self)
@@ -102,8 +108,12 @@ enum MacBridge {
         try Wire.writeFrame(JSONEncoder().encode(BridgeMessage(type: "open", url: url)), to: stream)
         guard let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EIO) }
         let reply = try JSONDecoder().decode(BridgeMessage.self, from: data)
-        if let error = reply.error { throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error]) }
-        guard reply.type == "result", let result = reply.result, ["focused", "opened"].contains(result) else { throw POSIXError(.EINVAL) }
+        if let error = reply.error {
+            throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+        }
+        guard reply.type == "result", let result = reply.result, ["focused", "opened"].contains(result) else {
+            throw POSIXError(.EINVAL)
+        }
         return result
     }
 }

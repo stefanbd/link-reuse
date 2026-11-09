@@ -11,17 +11,21 @@ OUTPUT.mkdir(parents=True, exist_ok=True)
 
 subprocess.run(['node', '--test', *sorted(map(str, TEST.glob('*.test.mjs')))], cwd=ROOT, check=True)
 
-common = ['BrowserConfiguration.swift', 'OpenRequest.swift', 'WebLink.swift']
-for test, sources in [('OpenRequestTests.swift', common),
-                      ('MacBridgeTests.swift', common + ['MacBridge.swift', 'BridgeMessage.swift', 'Wire.swift']),
-                      ('ExchangeTests.swift', ['BridgeMessage.swift', 'BridgeExchange.swift']),
-                      ('SafariBridgeTests.swift', ['BridgeMessage.swift', 'BridgeExchange.swift', 'SafariBridge.swift']),
-                      ('SafariBrowserClientTests.swift', ['BridgeMessage.swift', 'BridgeExchange.swift', 'SafariBridge.swift'])]:
+# Each Swift test compiles with just the app sources it exercises.
+requests = ['BrowserConfiguration.swift', 'OpenRequest.swift', 'WebLink.swift']
+exchange = ['BridgeMessage.swift', 'BridgeExchange.swift']
+for test, sources in [('OpenRequestTests.swift', requests),
+                      ('MacBridgeTests.swift', requests + ['MacBridge.swift', 'BridgeMessage.swift', 'Wire.swift']),
+                      ('ExchangeTests.swift', exchange),
+                      ('SafariBridgeTests.swift', exchange + ['SafariBridge.swift']),
+                      ('SafariBrowserClientTests.swift', exchange + ['SafariBridge.swift'])]:
     executable = OUTPUT / pathlib.Path(test).stem
     subprocess.run(['xcrun', 'swiftc', '-swift-version', '6', '-module-cache-path', str(ROOT / 'build/module-cache'),
-                    *(str(APP / source) for source in sources), str(TEST / test), '-o', str(executable)], cwd=ROOT, check=True)
+                    *(str(APP / source) for source in sources), str(TEST / test), '-o', str(executable)],
+                   cwd=ROOT, check=True)
     print('Running ' + test, flush=True)
     subprocess.run([str(executable)], cwd=ROOT, check=True, timeout=60)
 
 subprocess.run(['python3', '-m', 'unittest', 'test_packaging', 'test_install'], cwd=TEST, check=True)
-subprocess.run(['python3', '-m', 'py_compile', *map(str, [*ROOT.glob('macos/**/*.py'), *TEST.glob('*.py'), ROOT / 'windows/package.py'])], check=True)
+scripts = [*ROOT.glob('macos/**/*.py'), *TEST.glob('*.py'), ROOT / 'windows/package.py']
+subprocess.run(['python3', '-m', 'py_compile', *map(str, scripts)], check=True)

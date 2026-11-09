@@ -5,14 +5,21 @@ enum NativeHost {
     static func run(resources: AppResources) async throws {
         guard CommandLine.arguments.dropFirst().first == resources.extensionOrigin,
               let parent = NSRunningApplication(processIdentifier: getppid()),
-              let browser = parent.bundleIdentifier, resources.browsers.contains(where: { $0.bundleID == browser }) else { throw POSIXError(.EPERM) }
+              let browser = parent.bundleIdentifier,
+              resources.browsers.contains(where: { $0.bundleID == browser }) else { throw POSIXError(.EPERM) }
         signal(SIGPIPE, SIG_IGN)
-        guard let hello = try Wire.readFrame(from: .standardInput), try JSONDecoder().decode(BridgeMessage.self, from: hello).type == "hello" else { throw POSIXError(.EINVAL) }
+        guard let hello = try Wire.readFrame(from: .standardInput),
+              try JSONDecoder().decode(BridgeMessage.self, from: hello).type == "hello" else {
+            throw POSIXError(.EINVAL)
+        }
         try MacBridge.prepare()
         guard let started = MacBridge.processStarted(getpid()) else { throw POSIXError(.EPERM) }
-        var session = BridgeSession(id: UUID().uuidString, browser: browser, pid: getpid(), started: started, activeAt: Date.timeIntervalSinceReferenceDate)
+        let now = Date.timeIntervalSinceReferenceDate
+        var session = BridgeSession(id: UUID().uuidString, browser: browser, pid: getpid(), started: started, activeAt: now)
         let server = try MacBridge.descriptor(path: session.socket, listen: true)
-        let exchange = BridgeExchange { message in try Wire.writeFrame(JSONEncoder().encode(message), to: .standardOutput) }
+        let exchange = BridgeExchange { message in
+            try Wire.writeFrame(JSONEncoder().encode(message), to: .standardOutput)
+        }
         let listener = Thread { serve(server, exchange: exchange) }
         listener.start()
         defer {

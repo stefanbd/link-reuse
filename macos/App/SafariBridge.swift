@@ -28,7 +28,10 @@ actor SafariBridge {
         try await self.deliver(message)
     }
 
-    init(version: String, wake: @escaping @Sendable (BridgeMessage) async throws -> Void = SafariBridge.dispatch) async throws {
+    init(
+        version: String,
+        wake: @escaping @Sendable (BridgeMessage) async throws -> Void = SafariBridge.dispatch
+    ) async throws {
         self.version = version
         self.wake = wake
         let parameters = NWParametersBuilder.parameters {
@@ -88,7 +91,9 @@ actor SafariBridge {
     }
 
     private func deliver(_ message: BridgeMessage) async throws {
-        if let (profile, client) = clients.filter({ $0.value.authenticated }).max(by: { $0.value.activity < $1.value.activity }), let id = message.id {
+        // The most recently active authenticated connection (profile) gets the request.
+        let newest = clients.filter { $0.value.authenticated }.max { $0.value.activity < $1.value.activity }
+        if let (profile, client) = newest, let id = message.id {
             Self.log.notice("Safari transport: channel \(id, privacy: .public)")
             if await exchange.claim(id, profile: profile) {
                 do {
@@ -106,7 +111,8 @@ actor SafariBridge {
         let connected = clients.values.contains(where: \.authenticated)
         if connected, await exchange.unclaimed().isEmpty { return }
         Self.log.notice("Safari transport: bootstrap")
-        let token = Data(HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)).base64EncodedString()
+        let code = HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)
+        let token = Data(code).base64EncodedString()
         try await wake(BridgeMessage(type: "connect", endpoint: endpoint, token: token))
     }
 
@@ -128,7 +134,9 @@ actor SafariBridge {
             }
             guard hello.type == "hello", clients[identity] != nil,
                   let token = hello.token, let code = Data(base64Encoded: token),
-                  HMAC<SHA256>.isValidAuthenticationCode(code, authenticating: Self.authenticationData, using: key) else { throw POSIXError(.EPERM) }
+                  HMAC<SHA256>.isValidAuthenticationCode(code, authenticating: Self.authenticationData, using: key) else {
+                throw POSIXError(.EPERM)
+            }
             try await send(BridgeMessage(type: "ready", extensionVersion: version, profile: identity), to: connection)
             guard hello.extensionVersion == version else { throw POSIXError(.EPROTO) }
             if hello.result == "active" { activity += 1 }
@@ -136,7 +144,8 @@ actor SafariBridge {
             clients[identity]?.activity = hello.result == "active" ? activity : 0
             Self.log.notice("Safari transport: authenticated")
             for request in await exchange.unclaimed() {
-                if let id = request.id, await exchange.claim(id, profile: identity) { try await send(request, to: connection) }
+                guard let id = request.id, await exchange.claim(id, profile: identity) else { continue }
+                try await send(request, to: connection)
             }
             while true {
                 var message = try await Self.read(connection)
@@ -145,12 +154,16 @@ actor SafariBridge {
                     activity += 1
                     clients[identity]?.activity = activity
                 case "trace":
-                    guard let event = message.result, BridgeMessage.traceEvents.contains(event) else { throw POSIXError(.EINVAL) }
+                    guard let event = message.result, BridgeMessage.traceEvents.contains(event) else {
+                        throw POSIXError(.EINVAL)
+                    }
                     let tab = message.id.flatMap { Int($0) } ?? 0
                     Self.log.notice("Safari page link: \(event, privacy: .public) tab \(tab)")
                 case "result":
                     guard let id = message.id, UUID(uuidString: id) != nil,
-                          ["focused", "opened"].contains(message.result ?? "") || message.error != nil else { throw POSIXError(.EINVAL) }
+                          ["focused", "opened"].contains(message.result ?? "") || message.error != nil else {
+                        throw POSIXError(.EINVAL)
+                    }
                     message.profile = identity
                     _ = await exchange.receive(message)
                 case "authorize-create":
@@ -161,7 +174,9 @@ actor SafariBridge {
                 case "diagnostic":
                     guard let reason = message.result,
                           BridgeMessage.diagnosticReasons.contains(reason),
-                          let rawCode = message.error, let code = Int(rawCode), (0...4999).contains(code) else { throw POSIXError(.EINVAL) }
+                          let rawCode = message.error, let code = Int(rawCode), (0...4999).contains(code) else {
+                        throw POSIXError(.EINVAL)
+                    }
                     Self.log.notice("Safari browser ended: \(reason, privacy: .public) \(code)")
                 default: throw POSIXError(.EINVAL)
                 }
@@ -197,7 +212,8 @@ actor SafariBridge {
                 case .ping, .pong:
                     Self.log.debug("Safari control frame bytes: \(payload.count)")
                 case .close:
-                    Self.log.notice("Safari close frame: \(String(describing: frame.metadata.closeCode), privacy: .public)")
+                    let code = String(describing: frame.metadata.closeCode)
+                    Self.log.notice("Safari close frame: \(code, privacy: .public)")
                     throw POSIXError(.EPIPE)
                 case .text: result = try JSONDecoder().decode(BridgeMessage.self, from: payload)
                 default: throw POSIXError(.EINVAL)
@@ -215,6 +231,7 @@ actor SafariBridge {
 
     @MainActor private static func dispatch(_ message: BridgeMessage) async throws {
         let payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(message)) as? [String: Any]
-        try await SFSafariApplication.dispatchMessage(withName: "link-reuse", toExtensionWithIdentifier: extensionIdentifier, userInfo: payload)
+        try await SFSafariApplication.dispatchMessage(
+            withName: "link-reuse", toExtensionWithIdentifier: extensionIdentifier, userInfo: payload)
     }
 }

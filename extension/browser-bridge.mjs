@@ -1,16 +1,27 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
 import { reuseIndex, siteOf, pageKeys } from './page-keys.mjs';
 
+const maxPending = 16;
+const maxReconnects = 4;
+
+/**
+ * The extension's background: it routes links from the native app and from pages, keeps learning current, and gives
+ * each page the keys it needs to decide plain link clicks.
+ */
 export class BrowserBridge {
-  constructor(policy, { connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome, extensionVersion, reload,
-    learningState, saveLearning = async () => {}, platform = 'win' }) {
-    Object.assign(this, { policy, connectPort, queryTabs, resetLearning, badge, browserAPI, extensionVersion, reload, saveLearning, platform });
+  constructor(policy, {
+    connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome, extensionVersion, reload,
+    learningState, saveLearning = async () => {}, platform = 'win',
+  }) {
+    Object.assign(this, {
+      policy, connectPort, queryTabs, resetLearning, badge, browserAPI,
+      extensionVersion, reload, saveLearning, platform,
+    });
     this.learning = new LiveLearning(policy);
     this.learning.restore(learningState);
     this.saving = Promise.resolve();
     this.windowFocusOrder = new Map();
-    // What each page was last sent, so a pass messages only pages whose keys changed.
-    this.sentKeys = new Map();
+    this.sentKeys = new Map(); // what each page was last sent
     this.lastError = '';
     this.serial = Promise.resolve();
     this.pending = 0;
@@ -18,13 +29,20 @@ export class BrowserBridge {
     this.reconnectAttempts = 0;
     this.changed();
   }
-  observe(records) { this.learning.observe(records); this.changed(); }
+
+  observe(records) {
+    this.learning.observe(records);
+    this.changed();
+  }
+
+  /** Schedules a maintenance pass for a change in tabs or learning. */
   changed() {
     this.revision++;
     if (this.timer || this.maintaining) return;
     this.timer = setTimeout(() => void this.maintain(), 50);
   }
-  /** One pass at a time: a slow browser must not pile up tab queries. Changes during a pass get one catch-up pass. */
+
+  /** One pass at a time, so a slow browser can't pile up tab queries; changes during a pass get one more pass. */
   async maintain() {
     this.timer = undefined;
     this.maintaining = true;
@@ -42,17 +60,16 @@ export class BrowserBridge {
     }
     if (revision !== this.revision && !this.timer) this.timer = setTimeout(() => void this.maintain(), 50);
   }
+
   /**
-   * Each page holds the match keys of the other tabs on its own site, so it decides a plain link click at the click,
-   * before the page or its router acts on it, with no round trip to race. Only pages whose keys changed are messaged.
+   * Sends each page the match keys of the other tabs on its own site, so it can decide a plain link click at the click.
+   * Only pages whose keys changed are messaged; an unchanged site costs nothing.
    */
   publish(tabs) {
     this.pageIndex = reuseIndex(tabs, this.learning);
     const live = new Set(tabs.map(tab => tab.id));
     for (const id of this.sentKeys.keys()) if (!live.has(id)) this.sentKeys.delete(id);
     for (const tab of tabs) {
-      // A page's keys follow from its site's keys alone: an unchanged site needs no work for its pages, and a changed
-      // site messages only the pages whose own list changed.
       const site = !tab.discarded && siteOf(this.pageIndex, tab);
       const sent = this.sentKeys.get(tab.id);
       if (!site || sent?.signature === site.signature) continue;
@@ -60,12 +77,14 @@ export class BrowserBridge {
       const list = JSON.stringify(keys);
       this.sentKeys.set(tab.id, { signature: site.signature, list });
       if (sent?.list === list) continue;
-      // A page without the script (opened before the extension loaded) gets its keys when it next loads.
-      void Promise.resolve().then(() => this.browserAPI.tabs.sendMessage(tab.id, { type: 'page-keys', keys }, { frameId: 0 }))
+      // A page without the script gets its keys when it next loads; a failed send is retried on the next pass.
+      void Promise.resolve()
+        .then(() => this.browserAPI.tabs.sendMessage(tab.id, { type: 'page-keys', keys }, { frameId: 0 }))
         .catch(() => this.sentKeys.delete(tab.id));
     }
   }
-  /** A loading page's keys, from the last pass (a pending pass sends any change) or, in a fresh worker, current tabs. */
+
+  /** A loading page's keys: from the last pass, or from current tabs in a freshly started background. */
   async keysFor(tab) {
     this.pageIndex ??= reuseIndex(await this.queryTabs(), this.learning);
     const site = siteOf(this.pageIndex, tab);
@@ -74,8 +93,13 @@ export class BrowserBridge {
     this.sentKeys.set(tab.id, { signature: site.signature, list: JSON.stringify(keys) });
     return keys;
   }
-  /** User activity: reconnect if the helper connection is down, without a maintenance pass. */
-  activity() { void this.connect().catch(() => {}); }
+
+  /** User activity: reconnects the native app if needed, without a maintenance pass. */
+  activity() {
+    void this.connect().catch(() => {});
+  }
+
+  /** Connects to the native app (once at a time), reloading the extension if the app brings a newer one. */
   connect(force = false) {
     if (this.port) return this.ready;
     if (!force && Date.now() < (this.retryAt || 0)) return Promise.reject(new Error(this.lastError));
@@ -88,9 +112,10 @@ export class BrowserBridge {
         if (this.port !== port) return;
         if (message.type === 'ready') {
           clearTimeout(timeout);
-          if (typeof message.extensionVersion === 'string' && this.extensionVersion && message.extensionVersion !== this.extensionVersion) {
+          const version = message.extensionVersion;
+          if (typeof version === 'string' && this.extensionVersion && version !== this.extensionVersion) {
             this.lastError = 'Loading the updated extension…';
-            void Promise.resolve().then(() => this.reload(message.extensionVersion)).catch(error => {
+            void Promise.resolve().then(() => this.reload(version)).catch(error => {
               this.lastError = error.message;
               this.badge('!');
             });
@@ -104,32 +129,21 @@ export class BrowserBridge {
           this.badge('');
           resolve();
         }
-        if (message.type === 'open' && typeof message.id === 'string') {
-          this.reconnectAttempts = 0;
-          if (!this.connected) { port.postMessage({ type: 'result', id: message.id, error: this.lastError || 'The extension is still connecting.' }); return; }
-          void this.open(message.url, { deadline: message.deadline,
-            beforeCreate: port.authorizeCreation ? () => port.authorizeCreation(message.id, message.deadline) : undefined }, port).then(result => {
-            if (this.port === port) port.postMessage({ type: 'result', id: message.id, ...result });
-          }, error => {
-            if (this.port === port) port.postMessage({ type: 'result', id: message.id, error: error.message });
-          });
-        }
+        if (message.type === 'open' && typeof message.id === 'string') this.serveOpen(port, message);
       });
       port.onDisconnect.addListener(() => {
         if (this.port !== port) return;
         clearTimeout(timeout);
         this.port = undefined;
         this.connected = false;
+        // Safari's first retry is immediate; after that, and for Chromium, the wait doubles up to 20 seconds.
         const attempt = this.reconnectAttempts - (port.authorizeCreation ? 1 : 0);
         const delay = attempt < 0 ? 0 : Math.min(5000 * 2 ** attempt, 20000);
         this.retryAt = Date.now() + delay;
-        this.lastError = this.reconnectAttempts < 4 ? 'Browser helper disconnected. Reconnecting automatically…' :
-          'Could not reconnect to the browser helper. ' + (this.platform === 'mac' ?
-            'Run the installed Link Reuse app with --install, then open this popup again.' :
-            'Run link-reuse --install, then open this popup again.');
+        this.lastError = this.disconnectMessage();
         this.badge('!');
         reject(new Error(this.lastError));
-        if (this.reconnectAttempts < 4) {
+        if (this.reconnectAttempts < maxReconnects) {
           this.reconnectAttempts++;
           this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = undefined;
@@ -141,20 +155,48 @@ export class BrowserBridge {
     });
     return this.ready;
   }
+
+  /** A link from the native app; the reply goes back over the same connection. */
+  serveOpen(port, message) {
+    this.reconnectAttempts = 0;
+    const reply = result => {
+      if (this.port === port) port.postMessage({ type: 'result', id: message.id, ...result });
+    };
+    if (!this.connected) {
+      reply({ error: this.lastError || 'The extension is still connecting.' });
+      return;
+    }
+    const beforeCreate = port.authorizeCreation && (() => port.authorizeCreation(message.id, message.deadline));
+    void this.open(message.url, { deadline: message.deadline, beforeCreate }, port)
+      .then(reply, error => reply({ error: error.message }));
+  }
+
+  disconnectMessage() {
+    if (this.reconnectAttempts < maxReconnects) return 'Browser helper disconnected. Reconnecting automatically…';
+    return 'Could not reconnect to the browser helper. ' + (this.platform === 'mac'
+      ? 'Run the installed Link Reuse app with --install, then open this popup again.'
+      : 'Run link-reuse --install, then open this popup again.');
+  }
+
+  /** Routes one link. Links from the app and from pages share one queue, so two can never open the same tab twice. */
   open(url, opening = {}, port) {
-    if (this.pending >= 16) return Promise.reject(new Error('Too many links are pending. Please try again.'));
+    if (this.pending >= maxPending) return Promise.reject(new Error('Too many links are pending. Please try again.'));
     this.pending++;
     const result = this.serial.then(async () => {
       if (port && this.port !== port) throw new Error('The browser connection ended.');
       const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(url).length > 65536) throw new Error('Invalid web link.');
-      const result = await routeToTab(url, this.learning, this.browserAPI, this.windowFocusOrder, opening);
+      if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(url).length > 65536) {
+        throw new Error('Invalid web link.');
+      }
+      const routed = await routeToTab(url, this.learning, this.browserAPI, this.windowFocusOrder, opening);
       this.changed();
-      return result;
+      return routed;
     });
     this.serial = result.catch(() => {}).finally(() => { this.pending--; });
     return result;
   }
+
+  /** Saves learning when it changed; writes are queued so they never overlap. */
   persist() {
     this.saving = this.saving.catch(() => {}).then(async () => {
       const revision = this.learning.revision;
@@ -169,6 +211,7 @@ export class BrowserBridge {
     });
     return this.saving;
   }
+
   async clear() {
     this.revision++;
     this.learning.clear();
@@ -176,22 +219,33 @@ export class BrowserBridge {
     await this.persist();
     return this.status();
   }
+
   focused(windowId, focusedAt) {
     if (focusedAt > (this.windowFocusOrder.get(windowId) ?? -Infinity)) this.windowFocusOrder.set(windowId, focusedAt);
     if (this.connected) this.port.postMessage({ type: 'activity' });
   }
-  forgetWindow(windowId) { this.windowFocusOrder.delete(windowId); }
-  /** URL-free page-link event, tagged with a tab ID, for the native log; only Safari's authenticated channel carries it. */
-  trace(event, tabId) {
-    if (this.port?.transportConnected) this.port.postMessage({ type: 'trace', result: event, id: String(Number.isInteger(tabId) ? tabId : 0) });
+
+  forgetWindow(windowId) {
+    this.windowFocusOrder.delete(windowId);
   }
+
+  /** A URL-free page-link event for the native log; only Safari's authenticated channel carries it. */
+  trace(event, tabId) {
+    if (!this.port?.transportConnected) return;
+    this.port.postMessage({ type: 'trace', result: event, id: String(Number.isInteger(tabId) ? tabId : 0) });
+  }
+
   async status() {
     try { await this.connect(true); } catch (error) { this.lastError = error.message; }
-    const tabs = await this.queryTabs();
-    this.learning.prune(tabs);
+    this.learning.prune(await this.queryTabs());
     await this.persist().catch(() => {});
-    return { connected: !!this.connected, transportConnected: this.port?.transportConnected ?? !!this.connected,
-      lastError: this.lastError || this.storageError, pending: this.pending, maxBytes: this.policy.maxCacheBytes,
-      stats: { records: this.learning.records.size, bytes: this.learning.bytes } };
+    return {
+      connected: !!this.connected,
+      transportConnected: this.port?.transportConnected ?? !!this.connected,
+      lastError: this.lastError || this.storageError,
+      pending: this.pending,
+      maxBytes: this.policy.maxCacheBytes,
+      stats: { records: this.learning.records.size, bytes: this.learning.bytes },
+    };
   }
 }

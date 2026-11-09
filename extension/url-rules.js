@@ -9,8 +9,9 @@ globalThis.linkReuseURLRules = (() => {
   function normalizedKey(value, policy) {
     const url = new URL(value);
     for (const key of [...url.searchParams.keys()]) {
-      if ((policy.noiseQueryKeys ?? []).includes(queryName(key)) ||
-          (policy.noiseQueryPrefixes ?? []).some(prefix => key.toLowerCase().startsWith(prefix))) url.searchParams.delete(key);
+      const tracking = (policy.noiseQueryKeys ?? []).includes(queryName(key)) ||
+        (policy.noiseQueryPrefixes ?? []).some(prefix => key.toLowerCase().startsWith(prefix));
+      if (tracking) url.searchParams.delete(key);
     }
     url.searchParams.sort();
     return url.href;
@@ -22,7 +23,9 @@ globalThis.linkReuseURLRules = (() => {
       rules = (policy.identityRules ?? []).flatMap(rule => {
         try {
           if (!['name', 'host', 'path', 'identity'].every(key => typeof rule[key] === 'string' && rule[key])) return [];
-          return [{ ...rule, hostPattern: new RegExp('^(?:' + rule.host + ')$', 'i'), pathPattern: new RegExp('^(?:' + rule.path + ')$') }];
+          const hostPattern = new RegExp('^(?:' + rule.host + ')$', 'i');
+          const pathPattern = new RegExp('^(?:' + rule.path + ')$');
+          return [{ ...rule, hostPattern, pathPattern }];
         }
         catch { return []; }
       });
@@ -39,21 +42,25 @@ globalThis.linkReuseURLRules = (() => {
       }
       view.searchParams.sort();
       if (rule.ignoreAnchor === true && !view.hash.startsWith('#/') && !view.hash.startsWith('#!')) view.hash = '';
-      return JSON.stringify([rule.name, view.origin, rule.uppercase === true ? id.toUpperCase() : id, view.search, view.hash]);
+      const resource = rule.uppercase === true ? id.toUpperCase() : id;
+      return JSON.stringify([rule.name, view.origin, resource, view.search, view.hash]);
     }
     return null;
   }
 
   function mapsPlaceIdentity(url) {
-    if (!['google.com', 'www.google.com', 'maps.google.com'].includes(url.hostname) || !url.pathname.startsWith('/maps/place/')) return null;
-    const ids = new Set([...url.pathname.toLowerCase().matchAll(/!4m\d+!3m\d+!1s(0x[0-9a-f]+:0x[0-9a-f]+)(?=!|$)/g)].map(match => match[1]));
+    const maps = ['google.com', 'www.google.com', 'maps.google.com'].includes(url.hostname);
+    if (!maps || !url.pathname.startsWith('/maps/place/')) return null;
+    const places = url.pathname.toLowerCase().matchAll(/!4m\d+!3m\d+!1s(0x[0-9a-f]+:0x[0-9a-f]+)(?=!|$)/g);
+    const ids = new Set([...places].map(match => match[1]));
     return ids.size === 1 ? 'google-maps-place:' + [...ids][0] : null;
   }
 
   function snowflakeScope(url) {
     if (url.protocol !== 'https:') return null;
     const named = url.hostname.match(/^([a-z][a-z0-9]*)-([a-z0-9_-]+)\.snowflakecomputing\.com$/);
-    const app = url.hostname === 'app.snowflake.com' && url.pathname.toLowerCase().match(/^\/([a-z][a-z0-9]*)\/([a-z0-9_-]+)(?:\/|$)/);
+    const app = url.hostname === 'app.snowflake.com' &&
+      url.pathname.toLowerCase().match(/^\/([a-z][a-z0-9]*)\/([a-z0-9_-]+)(?:\/|$)/);
     const match = named || app;
     return match ? 'snowflake-account:' + match[1] + '/' + match[2].replace(/_/g, '-') : null;
   }
