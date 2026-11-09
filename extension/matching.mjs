@@ -174,27 +174,36 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   // after each route). Restored learning is still checked against current tabs before its first match.
   if (learning.restoredUnchecked) learning.prune(tabs);
   const request = learning.resolve(url);
-  const preferred = tabs.find(tab => tab.active && tab.windowId === window?.id);
+  // A same-tab link looks for another tab; its own tab would simply load it.
+  const reusable = opening.reuseOnly ? tabs.filter(tab => tab.id !== source?.id) : tabs;
+  const preferred = reusable.find(tab => tab.active && tab.windowId === window?.id);
   const match = (preferred && learning.matches(request, preferred) && preferred) ||
-    tabs.find(tab => urlKey(tab.pendingUrl || tab.url) === request.url && learning.matches(request, tab)) ||
-    tabs.find(tab => learning.matches(request, tab));
+    reusable.find(tab => urlKey(tab.pendingUrl || tab.url) === request.url && learning.matches(request, tab)) ||
+    reusable.find(tab => learning.matches(request, tab));
   if (match) {
     const current = learning.addressed(await browser.tabs.get(match.id));
     if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
     if (opening.deadline && opening.deadline <= Date.now()) throw new Error('The external request expired. Please open the link again.');
-    // A background click keeps its page in front: the match moves to where a new background tab would open. Chromium
-    // regroups a moved tab by its new neighbours, so it moves only within its own group (or between ungrouped tabs);
-    // otherwise it is focused. Safari has no groupId.
-    if (opening.active === false && source && current.id !== source.id && (current.groupId ?? -1) === (source.groupId ?? -1)) {
+    // The match moves to where the clicked page would have opened: beside its source for a background click (which
+    // keeps the source in front) and for a same-tab link (which then selects it). Chromium regroups a moved tab by its
+    // new neighbours, so it moves only within its own group (or between ungrouped tabs); otherwise it is just focused.
+    // Safari has no groupId.
+    let { windowId, active } = current;
+    if ((opening.active === false || opening.reuseOnly) && source && current.id !== source.id &&
+        (current.groupId ?? -1) === (source.groupId ?? -1)) {
       const index = current.windowId === source.windowId && current.index < source.index ? source.index : source.index + 1;
-      if (current.pinned || (current.windowId === source.windowId && current.index === index)) return { result: 'moved' };
-      const moved = await browser.tabs.move(current.id, { windowId: source.windowId, index }).then(() => true, () => false);
-      if (moved) return { result: 'moved' };
+      if (current.pinned || (current.windowId === source.windowId && current.index === index)) {
+        if (opening.active === false) return { result: 'moved' };
+      } else if (await browser.tabs.move(current.id, { windowId: source.windowId, index }).then(() => true, () => false)) {
+        if (opening.active === false) return { result: 'moved' };
+        if (windowId !== source.windowId) ({ windowId, active } = { windowId: source.windowId, active: false });
+      }
     }
     // Both requests go out at once; the browser applies them in order, saving a round trip.
-    await Promise.all([current.active || browser.tabs.update(match.id, { active: true }), activateWindow(match.windowId)]);
+    await Promise.all([active || browser.tabs.update(match.id, { active: true }), activateWindow(windowId)]);
     return { result: 'focused' };
   }
+  if (opening.reuseOnly) return { result: 'none' };
   const active = opening.active !== false;
   await opening.beforeCreate?.();
   if (opening.deadline && opening.deadline <= Date.now()) throw new Error('The external request expired. Please open the link again.');

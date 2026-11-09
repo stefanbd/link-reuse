@@ -982,3 +982,24 @@ test('a background match moves only within its own tab group or between ungroupe
     assert.deepEqual(h.calls.map(call => call[0]), expected === 'moved' ? ['move'] : ['focus']);
   }
 });
+
+test('a same-tab link switches to another tab showing it, moved beside the source, and never opens a tab', async () => {
+  const route = (h, url) => routeToTab(url, new LiveLearning(policy), h.api, new Map(), { sourceTabId: 1, reuseOnly: true }).then(value => value.result);
+  let h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }, { url: 'https://example.test/new' }]);
+  assert.equal(await route(h, 'https://example.test/new'), 'focused');
+  assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }], ['focus', 3, { active: true }]]);
+  // No other tab shows it, or only the source does: the page resumes its own navigation.
+  for (const url of ['https://example.test/missing', 'https://example.test/source']) {
+    h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }]);
+    assert.equal(await route(h, url), 'none');
+    assert.deepEqual(h.calls, []);
+  }
+  // Another tab group: focused where it is. Another window: brought beside the source and selected there.
+  h = browser([{ url: 'https://example.test/source', active: true, groupId: 4 }, { url: 'https://example.test/new', groupId: 5 }]);
+  assert.equal(await route(h, 'https://example.test/new'), 'focused');
+  assert.deepEqual(h.calls, [['focus', 2, { active: true }]]);
+  h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/new', windowId: 2, active: true }],
+    [{ id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' }]);
+  assert.equal(await route(h, 'https://example.test/new'), 'focused');
+  assert.deepEqual(h.calls, [['move', 2, { windowId: 1, index: 1 }], ['focus', 2, { active: true }]]);
+});

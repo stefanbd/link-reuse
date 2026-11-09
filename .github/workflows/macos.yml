@@ -19,8 +19,8 @@ jobs:
         run: python3 build.py
       - name: Package
         run: |
-          ditto -c -k --sequesterRsrc --keepParent 'build/products.noindex/Link Reuse.app' build/link-reuse-macos-3.2.48.zip
-          shasum -a 256 build/link-reuse-macos-3.2.48.zip > build/link-reuse-macos-3.2.48.zip.sha256
+          ditto -c -k --sequesterRsrc --keepParent 'build/products.noindex/Link Reuse.app' build/link-reuse-macos-3.2.49.zip
+          shasum -a 256 build/link-reuse-macos-3.2.49.zip > build/link-reuse-macos-3.2.49.zip.sha256
       - uses: actions/upload-artifact@v7
         with:
           name: link-reuse-macos

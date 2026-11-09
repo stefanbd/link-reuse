@@ -85,16 +85,21 @@ const skipReasons = new Set(['disabled', 'prevented', 'other', 'button', 'anchor
 // A tab the browser opened from a page; with the page-link events this shows any duplicate the handler missed.
 chrome.tabs.onCreated?.addListener(tab => { void ready.then(({ bridge }) => bridge.trace('tab-created', tab.openerTabId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (['page-link-capability', 'page-link'].includes(message.type) && sender.tab && !sender.tab.incognito) {
+  if (['page-link-capability', 'page-link', 'page-navigate'].includes(message.type) && sender.tab && !sender.tab.incognito) {
     void ready.then(async ({ bridge, platform }) => {
       if (message.type === 'page-link-capability') {
         if (sender.frameId === 0) bridge.trace('page-ready', sender.tab.id);
         return { enabled: true, platform };
       }
       if (!bridge.open) throw new Error('Webpage link reuse is unavailable in this browser.');
+      // A same-tab navigation only ever switches to an existing tab; the page resumes it when nothing matches.
+      const opening = message.type === 'page-navigate' ?
+        { sourceTabId: sender.tab.id, reuseOnly: true, deadline: Math.min(Number(message.deadline) || Date.now() + 800, Date.now() + 2000) } :
+        { sourceTabId: sender.tab.id, active: message.active !== false };
+      if (opening.reuseOnly && sender.frameId !== 0) return { result: 'none' };
       try {
-        const reply = await bridge.open(message.url, { sourceTabId: sender.tab.id, active: message.active !== false });
-        bridge.trace('page-' + reply.result, sender.tab.id);
+        const reply = await bridge.open(message.url, opening);
+        if (reply.result !== 'none') bridge.trace('page-' + reply.result, sender.tab.id);
         return reply;
       } catch (error) { bridge.trace('page-failed', sender.tab.id); throw error; }
     }).then(respond, error => respond({ error: error.message }));

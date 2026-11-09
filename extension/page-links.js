@@ -4,6 +4,8 @@
   // extension update fails its first send synchronously and then leaves clicks to the browser.
   let enabled = true;
   const mac = /^Mac/.test(navigator.platform);
+  const topFrame = window.top === window;
+  let clicked = null;
 
   // URL-free note of why a new-tab gesture was left to the browser, for the native diagnostics log.
   function skipped(reason) {
@@ -37,7 +39,14 @@
     const anchor = event.composedPath().find(value => value.localName === 'a' && value.hasAttribute('href'));
     if (!anchor || anchor.hasAttribute('download')) return skip('anchor');
     const target = (anchor.getAttribute('target') ?? document.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase();
-    if (!middle && !modified && target !== '_blank') return skip('target');
+    if (!middle && !modified && target !== '_blank') {
+      // A plain same-tab link: the navigate handler below may switch to a tab that already shows it.
+      if (topFrame && /^https?:/i.test(anchor.href) && ['', '_self', '_top', '_parent'].includes(target) &&
+          !/\bnoreferrer\b/i.test(anchor.rel ?? '') && !anchor.hasAttribute('referrerpolicy')) {
+        clicked = { url: anchor.href, at: event.timeStamp };
+      }
+      return skip('target');
+    }
     let url;
     try { url = new URL(anchor.href); } catch { return skip('other'); }
     if (!['http:', 'https:'].includes(url.protocol)) return skip('other');
@@ -51,4 +60,28 @@
   }
   window.addEventListener('click', open, true);
   window.addEventListener('auxclick', open, true);
+
+  // The navigate event fires only once a click has really become a navigation, after the page's own handlers (so
+  // client-side routing is untouched). It is cancelled while the extension checks for a tab already showing the
+  // destination; without one, or without an answer within a second, the navigation resumes unchanged.
+  if (!topFrame || !globalThis.navigation) return;
+  navigation.addEventListener('navigate', event => {
+    const link = clicked;
+    clicked = null;
+    if (!enabled || !link || event.timeStamp - link.at > 1000 || link.url !== event.destination.url || !event.userInitiated ||
+        !event.cancelable || event.navigationType !== 'push' || event.hashChange || event.formData || event.downloadRequest) return;
+    let response;
+    try {
+      response = chrome.runtime.sendMessage({ type: 'page-navigate', url: link.url, deadline: Date.now() + 800 });
+    } catch { enabled = false; return; }
+    event.preventDefault();
+    let settled = false;
+    const finish = reused => {
+      if (settled) return;
+      settled = true;
+      if (!reused) location.assign(link.url);
+    };
+    setTimeout(() => finish(false), 1000);
+    void response.then(reply => finish(reply?.result === 'focused'), () => finish(false));
+  });
 })();
