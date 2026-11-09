@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from install import BUILT_APP, unregister
 
-ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 APP = BUILT_APP
 PRODUCTS = APP.parent
@@ -27,7 +27,7 @@ def prepare():
         if name == 'app':
             shutil.copytree(ROOT / 'extension', resources / 'extension')
             (resources / 'configuration.json').write_text(json.dumps({
-                'browsers': json.loads((ROOT / 'browsers.json').read_text()),
+                'browsers': json.loads((ROOT / 'macos/browsers.json').read_text()),
                 'extensionOrigin': f'chrome-extension://{extension_id}/',
             }, indent=2))
         else:
@@ -74,7 +74,7 @@ def main():
     for product in [APP, PRODUCTS / 'LinkReuseSafari.appex']:
         if product.exists(): shutil.rmtree(product)
     try:
-        subprocess.run(['xcodebuild', '-project', str(ROOT / 'LinkReuse.xcodeproj'), '-scheme', 'Link Reuse',
+        subprocess.run(['xcodebuild', '-project', str(ROOT / 'macos/LinkReuse.xcodeproj'), '-scheme', 'Link Reuse',
                         '-configuration', 'Release', '-destination', 'generic/platform=macOS', '-derivedDataPath', str(BUILD / 'derived'),
                         'ARCHS=arm64 x86_64', 'ONLY_ACTIVE_ARCH=NO', 'CODE_SIGNING_ALLOWED=NO',
                         'CONFIGURATION_BUILD_DIR=' + str(PRODUCTS), '-quiet', 'build'], check=True, cwd=ROOT)

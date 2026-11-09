@@ -14,7 +14,7 @@ source_root = pathlib.Path(__file__).resolve().parent
 app = pathlib.Path.home() / 'Applications/Link Reuse.app'
 configuration = json.loads((app / 'Contents/Resources/configuration.json').read_text())
 browsers = configuration['browsers']
-template = (source_root / 'openin-rewrite.js').read_text().strip()
+template = (source_root / 'rewrite.js').read_text().strip()
 scripts = {browser['id']: template.replace('{{browser}}', browser['id']) for browser in browsers}
 mapping = {browser['bundleID']: browser['id'] for browser in browsers}
 mapping.update({f'me.dichev.LinkReuse.{browser["id"]}': browser['id'] for browser in browsers})

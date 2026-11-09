@@ -11,7 +11,7 @@ import tempfile
 import time
 import zipfile
 
-ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 APP = pathlib.Path.home() / 'Applications/Link Reuse.app'
 # Spotlight skips `.noindex` folders. An indexed build copy gets registered automatically, and two registered
 # copies of the Safari extension make PlugInKit kill it, so Safari reloads every extension mid-request.

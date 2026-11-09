@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { canonicalDestination as canonical } from './extension/canonical.mjs';
+import { canonicalDestination as canonical } from '../extension/canonical.mjs';
 
 test('a declared product or article canonical groups its deeper views', () => {
   assert.equal(canonical('https://shop.test/products/42/reviews', ['https://shop.test/products/42']), 'https://shop.test/products/42');
@@ -34,7 +34,7 @@ test('self canonical clears an old equivalence instead of creating a cycle', () 
 function readMetadata(canonicals, graphURLs) {
   const messages = [];
   let observed;
-  vm.runInNewContext(readFileSync(new URL('./extension/canonical.js', import.meta.url), 'utf8'), {
+  vm.runInNewContext(readFileSync(new URL('../extension/canonical.js', import.meta.url), 'utf8'), {
     location: { href: 'https://shop.test/item/reviews' },
     document: { readyState: 'complete', head: { querySelectorAll: selector => selector.startsWith('link') ?
       canonicals.map(href => ({ href })) : graphURLs.map(content => ({ content })) } },
@@ -57,7 +57,7 @@ test('page scripts left behind by an extension reload neither throw nor keep wat
   const invalidated = () => { throw new Error('Extension context invalidated.'); };
   let disconnected = false;
   let onMutation;
-  vm.runInNewContext(readFileSync(new URL('./extension/canonical.js', import.meta.url), 'utf8'), {
+  vm.runInNewContext(readFileSync(new URL('../extension/canonical.js', import.meta.url), 'utf8'), {
     location: { href: 'https://shop.test/item' },
     document: { readyState: 'complete', head: { querySelectorAll: () => [] } },
     MutationObserver: class { constructor(fn) { onMutation = fn; } observe() {} disconnect() { disconnected = true; } },
@@ -66,7 +66,7 @@ test('page scripts left behind by an extension reload neither throw nor keep wat
   assert.equal(disconnected, true);
   assert.doesNotThrow(() => onMutation());
   const listeners = new Map();
-  vm.runInNewContext(readFileSync(new URL('./extension/interaction.js', import.meta.url), 'utf8'), {
+  vm.runInNewContext(readFileSync(new URL('../extension/interaction.js', import.meta.url), 'utf8'), {
     window: { addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener() {} },
     chrome: { runtime: { onMessage: { addListener() {} }, sendMessage: invalidated } },
   });

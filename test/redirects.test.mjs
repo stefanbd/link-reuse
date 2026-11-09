@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RedirectObserver } from './extension/observer.mjs';
+import { RedirectObserver } from '../extension/observer.mjs';
 
 const A = 'https://example.test/source';
 const B = 'https://example.test/destination';

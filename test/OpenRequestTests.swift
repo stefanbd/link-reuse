@@ -6,8 +6,8 @@ struct OpenRequestTests {
     static func main() throws {
         let source = URL(filePath: FileManager.default.currentDirectoryPath)
         let browsers = try JSONDecoder().decode([BrowserConfiguration].self,
-            from: Data(contentsOf: source.appending(path: "browsers.json")))
-        let template = try String(contentsOf: source.appending(path: "openin-rewrite.js"), encoding: .utf8)
+            from: Data(contentsOf: source.appending(path: "macos/browsers.json")))
+        let template = try String(contentsOf: source.appending(path: "macos/openin/rewrite.js"), encoding: .utf8)
         let values = ["https://example.test/", "https://example.test/a?x=1&x=2#photos", "https://example.test/?q=a+b%26c",
                       "http://example.test:8080/a%2Fb?percent=%25", "https://example.test/é?q=日本語", "https://user:pass@example.test/?token=test"]
         var checks = 0

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
-const source = readFileSync(new URL('./extension/page-links.js', import.meta.url), 'utf8');
-const rulesSource = readFileSync(new URL('./extension/url-rules.js', import.meta.url), 'utf8');
-const policy = JSON.parse(readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
+const source = readFileSync(new URL('../extension/page-links.js', import.meta.url), 'utf8');
+const rulesSource = readFileSync(new URL('../extension/url-rules.js', import.meta.url), 'utf8');
+const policy = JSON.parse(readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
 const settle = () => new Promise(setImmediate);
 
 // keys: the match keys of other tabs on this site that the extension hands the page when it starts.

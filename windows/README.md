@@ -1,10 +1,11 @@
-# Link Reuse on Windows — first-install preview
+# Link Reuse on Windows
 
-Windows 10/11 x64, starting with Microsoft Edge. Chrome and Brave use the same extension and native protocol. This preview has focused logic/build checks; real browser focus and installation still need the first Windows trial.
+For Windows 10 and 11 (x64) with Edge, Chrome or Brave. Link Reuse is one standalone executable: it needs no .NET
+runtime, administrator rights, service, scheduled task or login entry.
 
-## Install with Scoop
+## Install
 
-After the Windows release and bucket manifest are published:
+In a normal (non-admin) PowerShell:
 
 ```powershell
 scoop bucket add link-reuse https://github.com/stefanbd/link-reuse
@@ -12,81 +13,56 @@ scoop install link-reuse/link-reuse
 link-reuse --setup
 ```
 
-Use a normal, non-admin PowerShell. The app is compiled to a standalone native executable; no .NET runtime, Python, AutoHotkey or Raycast installation is needed. There is no Start menu shortcut, Windows service, scheduled task or login entry.
+`--setup` opens a setup page in your browser. Then load the extension:
 
-`--setup` opens the bundled setup page in the selected browser. In Edge, open `edge://extensions`, enable Developer mode, choose **Load unpacked**, and select the installed `extension` folder. It is normally `~\scoop\apps\link-reuse\current\extension`. Open the extension popup to confirm the bridge is connected. Organization policies can block unpacked extensions or user-level native messaging even without an administrator requirement.
+1. Open `edge://extensions` (or `chrome://extensions`) and turn on **Developer mode**.
+2. Choose **Load unpacked** and select `~\scoop\apps\link-reuse\current\extension`. Always use `current`, never a
+   numbered version folder, so updates reach the browser.
+3. Open the extension's popup and check that it shows connected.
 
-Then choose how links reach the app:
+Organization policies can block unpacked extensions or native messaging.
 
-- **Direct:** run `link-reuse --defaults`, then choose Link Reuse for HTTP and HTTPS in Windows Settings. This changes the default browser/link-handler setting. Browsing still happens in Edge.
-- **Existing router:** keep the router as default. Add the installed `LinkReuse.exe` as a custom destination and pass the URL as one argument. For a specific browser, use arguments equivalent to `--browser edge "<url>"`, `--browser chrome "<url>"` or `--browser brave "<url>"`. Use the router's own URL placeholder syntax. No router-specific integration is included.
+## Send links to it
 
-App registrations and native messaging manifests are written only under HKCU and `%LOCALAPPDATA%\Link Reuse`. Existing registrations for other applications are not edited. Windows retains control of default-app consent.
+- **As the default:** run `link-reuse --defaults`, then choose Link Reuse for HTTP and HTTPS in Windows Settings. Pages
+  still open in your browser.
+- **From a link router:** keep your router as the default and add `LinkReuse.exe` as a destination, with the URL as
+  its argument. To pick a browser, pass `--browser edge "<url>"`, `--browser chrome "<url>"` or
+  `--browser brave "<url>"`.
 
-## First try
+`link-reuse --install --browser edge` registers one browser explicitly; `link-reuse --status` shows what is set up.
 
-1. Open a normal Edge tab at a non-sensitive web page.
-2. Open that exact URL from another app, or run `link-reuse "https://the-page-you-opened"` in PowerShell.
-3. Confirm Edge selects the existing tab, without changing its page or creating another tab.
-4. Try an unopened URL and confirm exactly one new tab appears.
+## Try it
 
-On webpages, links with `target="_blank"`, Ctrl-click and middle-click also use the same matcher before a tab is created. A matching tab is selected even if sleeping or discarded. Unmatched Ctrl/middle clicks create a background tab; Ctrl+Shift or Shift+middle clicks create a foreground tab. New tabs open next to their source in the source window. Normal same-tab clicks, Shift-only new-window clicks, downloads, non-web URLs and synthetic clicks keep the browser's handling.
+1. Open a page in your browser.
+2. Run `link-reuse "<that page's address>"`, or open the same link from another app.
+3. The existing tab is selected; no new tab opens.
+4. Open an address you don't have open: exactly one new tab appears.
 
-After installing or updating, reload the page **containing the links** once to load its click handler. Destination tabs do not need reloading or waking. The handler runs in web frames as well as the main page. It does not intercept Edge's address bar, bookmarks, native context-menu actions, browser-internal/store pages, or script-only popups that are not ordinary anchor new-tab clicks. It needs the browser's site-access permission on the source page. No temporary tab is opened and closed. An uncertain result reports a local error without automatically retrying through a second opening path.
-
-Choose Edge explicitly if needed:
-
-```powershell
-link-reuse --install --browser edge
-link-reuse --status
-```
-
-If the extension is disconnected, the opener reports the setup problem instead of opening a speculative duplicate. A request that times out is never automatically retried through a second opening path; check whether it completed before trying again.
-
-## Ownership and lifetime
-
-- The app receives normal HTTP/HTTPS URLs and forwards requests over current-user-only named pipes.
-- The browser launches a copy of the same executable from `%LOCALAPPDATA%\Link Reuse\host\<extension-version>`. Keeping the long-running host outside Scoop's package directory lets Scoop update normally. New copies are staged before replacing the registration; superseded copies are removed after their hosts stop. The host blocks between requests and exits when the browser closes the connection.
-- The extension owns Windows learning and tab selection. External requests and webpage new-tab clicks share one bounded serial queue and matching engine. Both query live normal tabs, activate a match without navigating it, or create one tab. Webpage clicks are handled within the extension without going through the native app. For external requests, the most recently focused connected profile is preferred; explicit profile routing is not yet supported.
-- `extension/matching.mjs` and `extension/browser-bridge.mjs` are shared with macOS for external and webpage opens. URL-format knowledge is isolated in `extension/url-rules.mjs`, with tracking keys and entity regex rules in `extension/learning-policy.json`. See the [shared matching policy](../README.md#matching-and-policy). Selection, final tab revalidation and association cleanup use the same matching predicate. The format reader never chooses a tab or retains observations. Ordinary redirects and conservative canonical/Open Graph learning remain independent of website rules; unfamiliar authentication flows are not inferred automatically.
-- New tabs prefer the most recently used non-minimized normal window visible to the extension. If all are minimized, the most recently used one is restored. Existing matching tabs are reused even in minimized windows. Window recency is kept in memory and starts fresh when the extension reloads; Edge's last-focused window is used when eligible. Workspace windows must be exposed by Edge's normal window and tab APIs; workspace names are not inferred.
-- Exact URLs, Google Maps place identity, observed redirects and conservative same-origin canonicals use the existing learning policy. Sensitive URLs bypass learning and direct reuse. Private windows are excluded.
-- Slack's documented `https://slack.com/openid/connect/login_initiate_redirect` link format has one narrow exception: the extension reads the original destination from the `login_hint` payload for tab lookup, including the clean Snowflake account landing links below. It does not authenticate the token, retain the extracted payload, learn the sign-in URL as an alias, or fetch the redirect. If no tab matches, it opens the original sign-in URL unchanged. Other OpenID/sign-in links remain excluded. See [Slack's link format](https://docs.slack.dev/authentication/sign-in-with-slack/setting-up-sign-in-with-slack-links/).
-- A clean Snowflake account landing link, including a Classic Console `/console/login#/` link, can focus an existing Snowsight view for the same organization/account. Specific worksheet URLs keep normal resource matching. If Link Reuse opens a sign-in flow, it retains only the account identity and created tab ID, under the same storage budget, so repeated landing-link clicks can focus that tab during Snowflake login/OAuth or the recognized Slack handoff. Closing it, changing accounts or leaving those recognized hosts removes that association. Unrelated pre-existing OAuth flows are not inferred to be the account page; direct OAuth requests still open unchanged. External identity-provider pages are outside this association. Account URL formats follow [Snowflake's account identifiers](https://docs.snowflake.com/en/user-guide/admin-account-identifier) and [Snowsight account URLs](https://docs.snowflake.com/en/release-notes/2023-05).
-- Learned relations are bounded to 4,096 entries / 2 MiB of encoded record data. A browser-session memory copy survives extension service-worker stops, so idling the worker does not forget redirects to sleeping tabs. Records are restored before the native connection accepts links and checked against current tabs before matching. Closing the last matching tab or completing an unrelated navigation removes them. Browser restarts and extension disable/reload/update clear session storage. Unknown redirects require a first visit. Session data is not saved to disk, synced, or exposed to content scripts.
-- Sleeping, frozen and discarded tabs are included in normal tab lookup. Selecting a match wakes or reloads that same tab through the browser, without contacting its content scripts or changing its URL. Tab activation and browser startup reconnect an idle worker; there is no keep-awake alarm or periodic polling. Session writes are coalesced after live-tab pruning, skipped when records are unchanged, and do not delay the link-opening result. The popup's Forget control also clears the session copy before reporting success.
-- Only connection metadata (process identity and random pipe name) is written to the Windows sessions directory. No page bodies or learned URLs are written there; no network service or browser debugging port is used.
-
-## Updates and removal
+## Update
 
 ```powershell
-scoop update
 scoop update link-reuse
 ```
 
-From Windows 0.1.2 / extension 3.1.2 onward, updates keep the HTTP/HTTPS registration, replace and restart the native host, and reload the extension automatically when its bundled version changes. Reconnection makes at most four timed attempts after a disconnect, then waits for browser activity or a popup request. There is no permanent polling or extra updater process. The ordinary link-opening path is unchanged.
+The update restarts the native helper, and the extension reloads itself. Reload pages that were already open to give
+them the new version.
 
-The extension must be loaded from Scoop's stable `current\extension` folder. Before an automatic reload it checks the version in that folder; a stale copy reports an error instead of repeatedly reloading. The ordinary Scoop `current` junction is required for this setup. The current release is Windows 0.1.6 / extension 3.1.6. Version 0.1.4 added the `storage` permission for browser-session memory; this update adds no new permissions. Allow or re-enable the extension if Edge requests it. It does not read saved browser history. Previously learned redirects need one visit after an update because extension updates clear session storage. Reload the source webpage once to load updated click handling. Right-button and native context-menu actions remain excluded.
+## Remove
 
-**One-time transition from 0.1.0 or 0.1.1:** turn off Link Reuse in the browser, run `Stop-Process -Name LinkReuse -Force -ErrorAction SilentlyContinue`, update through Scoop, then turn it back on and check version 3.1.6. Those older releases cannot perform the new restart/reload protocol.
-
-Before uninstalling, select your real browser in Windows Default Apps or restore the destination in your router:
+Choose your browser again in Windows Default Apps (or in your router) first, then:
 
 ```powershell
 scoop uninstall link-reuse
 ```
 
-Uninstall removes only registrations owned by this installation and stops its extension-host processes. The browser extension can then be removed in the browser's Extensions page.
+This removes only what Link Reuse registered. Remove the extension on the browser's extensions page.
 
-## Build
+## What it installs
 
-The GitHub Windows job does one native compilation, focused JavaScript routing/reconnection/privacy/redirect checks, and native request/framing/current-user-pipe checks. Click tests cover gesture selection, background-tab intent, source-window placement, frame messages and simultaneous native/page requests. Worker-recreation tests cover sleeping/discarded destinations, startup restore ordering, closure pruning and clearing during an older write. A small Windows file-lock check stages a replacement host outside the package while the preceding host file remains locked, then verifies a same-version reinstall. It does not launch or install browsers; real webpage event handling, Edge sleep/restore and a full Scoop update with a connected browser still need a Windows trial.
+- Registrations under `HKCU` only, never for other applications
+- The native helper, copied to `%LOCALAPPDATA%\Link Reuse\host\<version>` so Scoop can update while it runs
+- Current-user named pipes, with connection metadata only: no URLs or page content
 
-```powershell
-dotnet publish windows/LinkReuse/LinkReuse.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -o build/windows-native
-python windows/package.py build/windows-native/LinkReuse.exe
-```
-
-The package script emits a ZIP, SHA-256 checksum and a Scoop manifest with current-user registration/unregistration hooks. A Mac can cross-compile a larger self-contained build with `PublishSingleFile=true` in place of `PublishAot=true`, but Windows Native AOT publishing runs on Windows.
-
-Windows containers cannot provide the interactive desktop/browser check. For this preview, use the real Windows installation rather than setting up a Windows VM solely for testing.
+To build it or follow how releases happen, see [Development](../docs/development.md). For how matching works, see
+[How it works](../docs/how-it-works.md).

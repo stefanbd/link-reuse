@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { connectNative, prepareNative } from './extension/native-port.mjs';
-import { RedirectObserver } from './extension/observer.mjs';
-import { safariTransport } from './test_safari_support.mjs';
-import { permittedTabs } from './extension/matching.mjs';
+import { connectNative, prepareNative } from '../extension/native-port.mjs';
+import { RedirectObserver } from '../extension/observer.mjs';
+import { safariTransport } from './safari-support.mjs';
+import { permittedTabs } from '../extension/matching.mjs';
 
 test('Safari queries only granted websites without prompting for unrelated open tabs', async () => {
   const calls = [];
@@ -313,10 +313,10 @@ test('Safari URL updates and verified document messages retain automatic rewrite
     webNavigation: { onBeforeNavigate: event(), onCommitted: event(), onErrorOccurred: event(), async getFrame() { return { ...frame }; } },
     action: { async setBadgeText() {} },
   };
-  const policy = JSON.parse((await import('node:fs')).readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
+  const policy = JSON.parse((await import('node:fs')).readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
   context.mock.method(globalThis, 'fetch', async () => ({ async json() { return policy; } }));
   try {
-    await import('./extension/background.mjs?safari-history');
+    await import('../extension/background.mjs?safari-history');
     await new Promise(setImmediate);
     for (const [id, timer] of [...scheduled]) if (timer.delay === 50) { scheduled.delete(id); timer.fn(); }
     await new Promise(setImmediate);

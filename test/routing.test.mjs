@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { LiveLearning, routeToTab } from './extension/matching.mjs';
-import { BrowserBridge as WindowsBridge } from './extension/browser-bridge.mjs';
-import { urlRules } from './extension/url-rules.mjs';
-import { reuseIndex, siteOf, pageKeys } from './extension/page-keys.mjs';
+import { LiveLearning, routeToTab } from '../extension/matching.mjs';
+import { BrowserBridge as WindowsBridge } from '../extension/browser-bridge.mjs';
+import { urlRules } from '../extension/url-rules.mjs';
+import { reuseIndex, siteOf, pageKeys } from '../extension/page-keys.mjs';
 
 const keysOf = (index, tab) => { const site = siteOf(index, tab); return site && pageKeys(site, tab); };
-import { safariTransport } from './test_safari_support.mjs';
+import { safariTransport } from './safari-support.mjs';
 
-const policy = JSON.parse(readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
+const policy = JSON.parse(readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
 const place = 'https://www.google.com/maps/place/Restaurant/@42,23,17z/data=!4m6!3m5!1s0x40aa8541e3d5da63:0x5353ef1753a6f43c!8m2!3d42';
 const photo = 'https://www.google.com/maps/place/Restaurant/@42,23,3a/data=!3m8!1sPHOTO!4m7!3m6!1s0x40aa8541e3d5da63:0x5353ef1753a6f43c!8m2!3d42';
 
@@ -274,7 +274,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
   context.mock.method(globalThis, 'fetch', async () => ({ async json() { return policy; } }));
   try {
     if (mode === 'safari') { delete chrome.webNavigation.onHistoryStateUpdated; delete chrome.webNavigation.onReferenceFragmentUpdated; }
-    await import('./extension/background.mjs?session-restore=' + mode);
+    await import('../extension/background.mjs?session-restore=' + mode);
     await new Promise(setImmediate);
     assert.equal(accessLevel, 'TRUSTED_CONTEXTS');
     chrome.tabs.onUpdated.emit(1, { discarded: true, status: 'unloaded' });

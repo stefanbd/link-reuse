@@ -2,9 +2,11 @@
 """Check browser packages use the same engine, permissions, policy and version."""
 import json
 import pathlib
+import sys
 import plistlib
 import tempfile
 import unittest
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'macos'))
 import build
 
 
