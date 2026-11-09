@@ -2,15 +2,17 @@
 globalThis.linkReuseURLRules = (() => {
   const compiledPolicies = new WeakMap();
 
-  function normalizedKey(value, policy, rule = {}) {
+  // Query keys compare without case, hyphens or underscores (search_id, searchId and searchid are one key).
+  const queryName = key => key.toLowerCase().replace(/[-_]/g, '');
+
+  // A URL without known tracking parameters, in a stable order. Every other parameter may choose a different page.
+  function normalizedKey(value, policy) {
     const url = new URL(value);
-    const names = [...(policy.noiseQueryKeys ?? []), ...(rule.noiseQueryKeys ?? [])];
     for (const key of [...url.searchParams.keys()]) {
-      const name = key.toLowerCase().replace(/[-_]/g, '');
-      if (names.includes(name) || (policy.noiseQueryPrefixes ?? []).some(prefix => key.toLowerCase().startsWith(prefix))) url.searchParams.delete(key);
+      if ((policy.noiseQueryKeys ?? []).includes(queryName(key)) ||
+          (policy.noiseQueryPrefixes ?? []).some(prefix => key.toLowerCase().startsWith(prefix))) url.searchParams.delete(key);
     }
     url.searchParams.sort();
-    if (rule.ignoreAnchor === true && !url.hash.startsWith('#/') && !url.hash.startsWith('#!')) url.hash = '';
     return url.href;
   }
 
@@ -29,8 +31,15 @@ globalThis.linkReuseURLRules = (() => {
     for (const rule of rules) {
       if (!rule.hostPattern.test(url.hostname) || !rule.pathPattern.test(url.pathname)) continue;
       const id = url.pathname.replace(rule.pathPattern, rule.identity);
-      const normalized = new URL(normalizedKey(url.href, policy, rule));
-      return JSON.stringify([rule.name, normalized.origin, rule.uppercase === true ? id.toUpperCase() : id, normalized.search, normalized.hash]);
+      // On a resource the rule identifies, query parameters are view state (a focused comment, a tab, tracking) unless
+      // the rule names them as choosing a different resource; an anchor too, unless it is an app route (#/ or #!).
+      const view = new URL(url.href);
+      for (const key of [...view.searchParams.keys()]) {
+        if (!(rule.meaningfulQueryKeys ?? []).includes(queryName(key))) view.searchParams.delete(key);
+      }
+      view.searchParams.sort();
+      if (rule.ignoreAnchor === true && !view.hash.startsWith('#/') && !view.hash.startsWith('#!')) view.hash = '';
+      return JSON.stringify([rule.name, view.origin, rule.uppercase === true ? id.toUpperCase() : id, view.search, view.hash]);
     }
     return null;
   }

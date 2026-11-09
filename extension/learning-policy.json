@@ -17,15 +17,14 @@
       "identity": "$1",
       "uppercase": true,
       "ignoreAnchor": true,
-      "noiseQueryKeys": ["searchid", "notificationreferrerid", "refsrc"]
+      "meaningfulQueryKeys": ["selectedissue"]
     },
     {
       "name": "confluence-page",
       "host": "[a-z0-9-]+\\.atlassian\\.net",
       "path": "/wiki/spaces/[^/]+/pages/([0-9]+)(?:/[^/]*)?/?",
       "identity": "$1",
-      "ignoreAnchor": true,
-      "noiseQueryKeys": ["searchid", "notificationreferrerid", "refsrc"]
+      "ignoreAnchor": true
     },
     {
       "name": "github-thread",

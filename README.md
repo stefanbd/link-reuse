@@ -1,6 +1,6 @@
 # Link Reuse
 
-[Source and releases](https://github.com/stefanbd/link-reuse). Windows packages are published automatically from `main` (see Releases); the published macOS package remains 3.2.12. The current extension/macOS version is 3.2.53. Safari remains a development preview.
+[Source and releases](https://github.com/stefanbd/link-reuse). Windows packages are published automatically from `main` (see Releases); the published macOS package remains 3.2.12. The current extension/macOS version is 3.2.54. Safari remains a development preview.
 
 Link Reuse selects an existing matching tab before creating a new one. It preserves that tab's current page and deeper view. External links and webpage new-tab clicks use the **same extension matcher on Windows and macOS**. The native apps only deliver external links and activate the browser; they do not maintain separate matching rules.
 
@@ -25,9 +25,9 @@ Supported browsers: Edge, Chrome and Brave on Windows; Arc, Chrome, Brave, Edge 
 
 - `noiseQueryKeys`: known tracking keys, compared without case, hyphens or underscores.
 - `noiseQueryPrefixes`: literal case-insensitive prefixes. The default `utm_` does not swallow unrelated names such as `utmost`.
-- `identityRules`: `{name, host, path, identity, uppercase?, ignoreAnchor?, noiseQueryKeys?}`. Host/path regexes match the entire host/path. `identity` is a JavaScript replacement template such as `$1`. Patterns compile once per policy. Invalid rules are ignored.
+- `identityRules`: `{name, host, path, identity, uppercase?, ignoreAnchor?, meaningfulQueryKeys?}`. Host/path regexes match the entire host/path. `identity` is a JavaScript replacement template such as `$1`. Patterns compile once per policy. Invalid rules are ignored.
 
-Defaults identify Jira issues, Confluence pages by page ID rather than title slug, and GitHub issue/PR threads. Identities include origin and rule name so different tenants, repositories and resources stay separate. Remaining meaningful query values and hash routes are retained. Jira/Confluence `search_id`, notification-referrer and `ref_src` differences are handled only within their rules; unrelated websites' search IDs remain meaningful.
+Defaults identify Jira issues, Confluence pages by page ID rather than title slug, and GitHub issue/PR threads. Identities include origin and rule name so different tenants, repositories and resources stay separate. On a resource a rule identifies, query parameters are view state by default (a focused comment or worklog, tabs, `atlOrigin`, search and notification tracking): they need no list and new ones need no update. A rule lists only the parameters that choose a different resource, compared like noise keys; Jira's `selectedIssue` is the default one. Anchors are ignored with `ignoreAnchor`, except app routes (`#/`, `#!`). Pages without a rule keep every parameter except known tracking, since there `?v=` or `?q=` can mean a different page.
 
 Generic comparison removes known tracking parameters and sorts query names, preserving the order of repeated values. It **does not universally strip trailing slashes or fragments**: `/item` and `/item/`, or `#inbox` and `#sent`, can represent different resources. Known entity rules may ignore ordinary anchors and accept a trailing slash; `#/` and `#!` routes remain distinct.
 
