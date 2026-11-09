@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 import pathlib
 import shutil
 import tempfile
@@ -12,7 +13,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('executable', type=pathlib.Path)
 parser.add_argument('--output', type=pathlib.Path, default=ROOT / 'build/windows')
-parser.add_argument('--version', default='0.1.11')
+# The project file is the one place the Windows version is set.
+VERSION = re.search(r'<Version>([^<]+)</Version>', (ROOT / 'windows/LinkReuse/LinkReuse.csproj').read_text()).group(1)
+parser.add_argument('--version', default=VERSION)
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 archive = args.output / f'link-reuse-windows-x64-{args.version}.zip'

@@ -36,3 +36,51 @@ jobs:
         with:
           name: link-reuse-windows
           path: build/windows/*
+  # Every push to main that changes what Windows ships publishes it: release windows-v<Version> and point the Scoop
+  # bucket at it, so `scoop update link-reuse` sees it. The version is <Version> in windows/LinkReuse/LinkReuse.csproj.
+  release:
+    needs: package
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: windows-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: link-reuse-windows
+          path: build/windows
+      - name: Publish the release and its Scoop manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version build/windows/link-reuse.json)
+          extension=$(jq -r .version extension/manifest.json)
+          tag="windows-v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if git diff --quiet "$tag" HEAD -- extension windows; then echo "$tag is already published and nothing it ships has changed."; exit 0; fi
+            echo "::error::extension/ or windows/ changed since $tag. Bump <Version> in windows/LinkReuse/LinkReuse.csproj to publish it."
+            exit 1
+          fi
+          previous=$(git tag --list 'windows-v*' --sort=-v:refname | head -n 1)
+          if [ -n "$previous" ] && ! git diff --quiet "$previous" HEAD -- extension &&
+             [ "$(git show "$previous:extension/manifest.json" | jq -r .version)" = "$extension" ]; then
+            echo "::error::extension/ changed since $previous but its version is still $extension. Bump extension/manifest.json so browsers reload it."
+            exit 1
+          fi
+          gh release create "$tag" build/windows/* --target "$GITHUB_SHA" --title "Windows $version — shared extension $extension" --notes \
+            "Bundles shared extension $extension and the native Windows $version app, built from $GITHUB_SHA after the shared JavaScript tests, packaging checks and native self-test passed. Update with \`scoop update link-reuse\`."
+          cp build/windows/link-reuse.json bucket/link-reuse.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bucket/link-reuse.json
+          git diff --cached --quiet || git commit -m "Publish the Scoop manifest for Windows $version"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
