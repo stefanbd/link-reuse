@@ -1,6 +1,6 @@
 # Link Reuse
 
-[Source and releases](https://github.com/stefanbd/link-reuse). Windows packages are published automatically from `main` (see Releases); the published macOS package remains 3.2.12. The current extension/macOS version is 3.2.49. Safari remains a development preview.
+[Source and releases](https://github.com/stefanbd/link-reuse). Windows packages are published automatically from `main` (see Releases); the published macOS package remains 3.2.12. The current extension/macOS version is 3.2.50. Safari remains a development preview.
 
 Link Reuse selects an existing matching tab before creating a new one. It preserves that tab's current page and deeper view. External links and webpage new-tab clicks use the **same extension matcher on Windows and macOS**. The native apps only deliver external links and activate the browser; they do not maintain separate matching rules.
 

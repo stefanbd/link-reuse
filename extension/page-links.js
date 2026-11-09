@@ -68,7 +68,8 @@
   navigation.addEventListener('navigate', event => {
     const link = clicked;
     clicked = null;
-    if (!enabled || !link || event.timeStamp - link.at > 1000 || link.url !== event.destination.url || !event.userInitiated ||
+    // The recorded trusted click identifies the user's link; Safari reports userInitiated false even for it.
+    if (!enabled || !link || event.timeStamp - link.at > 1000 || link.url !== event.destination.url ||
         !event.cancelable || event.navigationType !== 'push' || event.hashChange || event.formData || event.downloadRequest) return;
     let response;
     try {

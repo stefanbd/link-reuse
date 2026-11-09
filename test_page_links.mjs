@@ -165,7 +165,7 @@ test('without a matching tab, on failure or without an answer within a second th
 
 test('navigations not started by a plain same-tab link click are left to the browser', async () => {
   for (const [attributes, click, navigation, options] of [
-    [null, {}, {}], [{}, {}, { destination: { url: 'https://example.test/other' } }], [{}, {}, { userInitiated: false }],
+    [null, {}, {}], [{}, {}, { destination: { url: 'https://example.test/other' } }],
     [{}, {}, { formData: {} }], [{}, {}, { hashChange: true }], [{}, {}, { navigationType: 'replace' }], [{}, {}, { cancelable: false }],
     [{}, {}, { downloadRequest: 'file' }], [{}, {}, { timeStamp: 2000 }], [{ rel: 'noreferrer' }, {}, {}], [{ referrerpolicy: 'origin' }, {}, {}],
     [{ download: '' }, {}, {}], [{ target: 'frame' }, {}, {}], [{}, { isTrusted: false }, {}], [{}, { defaultPrevented: true }, {}],
@@ -176,4 +176,11 @@ test('navigations not started by a plain same-tab link click are left to the bro
     assert.equal(h.navigate(navigation).cancelled, undefined, JSON.stringify([attributes, click, navigation, options]));
     assert.equal(h.sent.length, 0);
   }
+});
+
+test('Safari reports a link click navigation as not user-initiated; the recorded trusted click is what counts', async () => {
+  const h = harness({ reply: { result: 'focused' } });
+  h.click();
+  assert.equal(h.navigate({ userInitiated: false }).cancelled, true);
+  assert.equal(h.sent[0].type, 'page-navigate');
 });
