@@ -57,7 +57,10 @@ export class LiveLearning {
    * page keys and tab matching ask. Callers must not change the returned set.
    */
   keys(value) {
-    if (this.keyCache?.revision !== this.revision) this.keyCache = { revision: this.revision, keys: new Map() };
+    // Bounded like the learning itself, so a long session cannot grow it without limit.
+    if (this.keyCache?.revision !== this.revision || this.keyCache.keys.size >= this.policy.maxRecords) {
+      this.keyCache = { revision: this.revision, keys: new Map() };
+    }
     let keys = this.keyCache.keys.get(value);
     if (keys) return keys;
     keys = new Set();
@@ -190,29 +193,17 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
     const current = learning.addressed(await browser.tabs.get(match.id));
     if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
     if (opening.deadline && opening.deadline <= Date.now()) throw new Error('The external request expired. Please open the link again.');
-    // The match goes where the clicked page would have opened: beside its source, for a background click (which keeps
-    // the source in front) and for a same-tab link. Chromium regroups a moved tab by its new neighbours, so it moves
-    // only within its own group (or between ungrouped tabs); a pinned tab or one already in place stays. Safari has no
-    // groupId.
-    const beside = (opening.active === false || opening.reuseOnly) && source && current.id !== source.id &&
-      (current.groupId ?? -1) === (source.groupId ?? -1);
-    let place = null;
-    if (beside) {
+    // A background click keeps its page in front, so its whole action is moving the match to where the new tab would
+    // have opened, beside the source. Chromium regroups a moved tab by its new neighbours, so it moves only within its
+    // own group (or between ungrouped tabs; Safari has no groupId); a pinned tab or one already in place stays. Only a
+    // match that cannot move is focused instead. Every other request selects the match where it is.
+    if (opening.active === false && source && current.id !== source.id && (current.groupId ?? -1) === (source.groupId ?? -1)) {
       const index = current.windowId === source.windowId && current.index < source.index ? source.index : source.index + 1;
-      if (!current.pinned && !(current.windowId === source.windowId && current.index === index)) place = { windowId: source.windowId, index };
+      if (current.pinned || (current.windowId === source.windowId && current.index === index) ||
+          await browser.tabs.move(current.id, { windowId: source.windowId, index }).then(() => true, () => false)) return { result: 'moved' };
     }
-    const move = () => browser.tabs.move(current.id, place).then(() => true, () => false);
-    // A background click's whole action is the move; only a match that cannot move is focused instead.
-    if (opening.active === false && beside && (!place || await move())) return { result: 'moved' };
-    // Focus is the priority: a same-tab link's move goes out with it, never ahead of it, and the browser applies the
-    // requests in order, so the selected tab still lands beside its source. A failed move never holds the focus up; a
-    // match that failed to move into the source window has its own window brought forward instead.
-    // For now a plain-click switch only focuses its match; moving it beside the source is to become an optional setting.
-    // const moving = opening.reuseOnly && place ? move() : null;
-    const moving = null;
-    const windowId = moving ? place.windowId : current.windowId;
-    await Promise.all([(current.active && !moving) || browser.tabs.update(match.id, { active: true }), activateWindow(windowId)]);
-    if (moving && windowId !== current.windowId && !await moving) await activateWindow(current.windowId);
+    // Both requests go out at once; the browser applies them in order, saving a round trip.
+    await Promise.all([current.active || browser.tabs.update(match.id, { active: true }), activateWindow(current.windowId)]);
     return { result: 'focused' };
   }
   if (opening.reuseOnly) return { result: 'none' };

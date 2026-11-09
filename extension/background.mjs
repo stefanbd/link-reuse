@@ -33,7 +33,7 @@ const ready = Promise.all([
       chrome.runtime.reload();
     },
   });
-  return { policy, bridge, platform: platform.os };
+  return { policy, bridge };
 });
 
 // What a page needs to compute a link's keys itself: the URL rules, without the learning limits.
@@ -86,18 +86,11 @@ chrome.windows.onFocusChanged.addListener(windowId => {
 });
 chrome.windows.onRemoved.addListener(windowId => { void ready.then(({ bridge }) => bridge.forgetWindow?.(windowId)); });
 const skipReasons = new Set(['disabled', 'prevented', 'other', 'button', 'anchor', 'target']);
-// A tab the browser opened from a page; with the page-link events this shows any duplicate the handler missed.
-chrome.tabs.onCreated?.addListener(tab => { void ready.then(({ bridge }) => bridge.trace('tab-created', tab.openerTabId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (['page-link-capability', 'page-link', 'page-navigate', 'page-keys'].includes(message.type) && sender.tab && !sender.tab.incognito) {
-    void ready.then(async ({ bridge, platform, policy }) => {
-      if (message.type === 'page-link-capability') {
-        if (sender.frameId === 0) bridge.trace('page-ready', sender.tab.id);
-        return { enabled: true, platform };
-      }
+  if (['page-link', 'page-navigate', 'page-keys'].includes(message.type) && sender.tab && !sender.tab.incognito) {
+    void ready.then(async ({ bridge, policy }) => {
       // A page starting up: its current keys, and the rules to compute a link's keys with.
       if (message.type === 'page-keys') return sender.frameId === 0 ? { keys: await bridge.keysFor(sender.tab), rules: pageRules(policy) } : null;
-      if (!bridge.open) throw new Error('Webpage link reuse is unavailable in this browser.');
       // A same-tab link only ever switches to an existing tab, with no deadline; the page loads it itself otherwise.
       const sameTab = message.type === 'page-navigate';
       if (sameTab && sender.frameId !== 0) return { result: 'none' };

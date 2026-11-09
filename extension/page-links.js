@@ -1,7 +1,6 @@
 (() => {
-  // Active from page start. Waiting for the extension to answer first let new-tab clicks through to the browser
-  // whenever the browser was slow; now a slow extension only delays the tab switch. A script disconnected by an
-  // extension update fails its first send synchronously and then leaves clicks to the browser.
+  // Active from page start and never waiting on the extension: a slow extension only delays the switch. A script
+  // disconnected by an extension update fails its first send synchronously and then leaves clicks to the browser.
   let enabled = true;
   const mac = /^Mac/.test(navigator.platform);
   const topFrame = window.top === window;
@@ -32,10 +31,8 @@
   // Whether another tab on this site already shows url: the link's own keys, as the background computes them.
   function shownElsewhere(url) {
     if (!rules || !reuseKeys.size) return false;
-    try {
-      const { normalizedKey, urlRules } = globalThis.linkReuseURLRules;
-      return [url, normalizedKey(url, rules), urlRules(url, rules).identity].some(key => key && reuseKeys.has(key));
-    } catch { return false; }
+    const { normalizedKey, urlRules } = globalThis.linkReuseURLRules;
+    return [url, normalizedKey(url, rules), urlRules(url, rules).identity].some(key => key && reuseKeys.has(key));
   }
 
   // Hands the click to the extension: it is cancelled once the request is on its way, and settle() acts on the answer,

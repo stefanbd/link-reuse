@@ -297,7 +297,6 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     assert.equal(saved.learning.length, 2);
     const fromPage = { tab: { ...h.tabs[0] }, frameId: 2 };
     const send = message => new Promise(resolve => chrome.runtime.onMessage.emit(message, fromPage, resolve));
-    assert.deepEqual(await send({ type: 'page-link-capability' }), { enabled: true, platform });
     assert.deepEqual(await send({ type: 'page-link', url: 'https://example.test/short', active: false }), { result: 'focused' });
     assert.equal(h.tabs.length, 1);
     h.tabs.length = 0;
@@ -1040,27 +1039,6 @@ test('a same-tab link switches to another tab showing it where it is, and never 
     [{ id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' }]);
   assert.equal(await route(h, 'https://example.test/new'), 'focused');
   assert.deepEqual(h.calls, [['window', 2, { focused: true }]]);
-});
-
-// Plain-click moves are switched off in routeToTab until they become an optional setting; re-enable with it.
-test.skip('a same-tab switch never waits for the move: focus goes out with it, and a failed move still focuses', async () => {
-  const route = h => routeToTab('https://example.test/new', new LiveLearning(policy), h.api, new Map(), { sourceTabId: 1, reuseOnly: true });
-  // The browser has not finished (or never finishes) the move: the focus request is already out.
-  let h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }, { url: 'https://example.test/new' }]);
-  h.api.tabs.move = (id, change) => { h.calls.push(['move', id, change]); return new Promise(() => {}); };
-  assert.equal((await route(h)).result, 'focused');
-  assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }], ['focus', 3, { active: true }]]);
-  // A refused move in the same window: the tab is selected where it is.
-  h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }, { url: 'https://example.test/new' }]);
-  h.api.tabs.move = async (id, change) => { h.calls.push(['move', id, change]); throw new Error('Tabs cannot be edited right now.'); };
-  assert.equal((await route(h)).result, 'focused');
-  assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }], ['focus', 3, { active: true }]]);
-  // A refused move from another window: the match is selected there and its own window comes forward.
-  h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/new', windowId: 2 }],
-    [{ id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' }]);
-  h.api.tabs.move = async (id, change) => { h.calls.push(['move', id, change]); throw new Error('Tabs cannot be edited right now.'); };
-  assert.equal((await route(h)).result, 'focused');
-  assert.deepEqual(h.calls, [['move', 2, { windowId: 1, index: 1 }], ['focus', 2, { active: true }], ['window', 2, { focused: true }]]);
 });
 
 test('pages get the match keys of other tabs on their own site only, including learned links that lead there', async () => {
