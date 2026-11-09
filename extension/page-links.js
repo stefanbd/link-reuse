@@ -5,8 +5,9 @@
   let enabled = true;
   const mac = /^Mac/.test(navigator.platform);
   const topFrame = window.top === window;
-  let probe = null;
-  let clicked = null;
+  // Match keys of the other tabs on this site, kept current by the extension, and the rules to compute a link's keys.
+  let reuseKeys = new Set();
+  let rules = null;
 
   // URL-free note of why a new-tab gesture was left to the browser, for the native diagnostics log.
   function skipped(reason) {
@@ -28,41 +29,24 @@
     document.documentElement.append(notice);
   }
 
-  // A plain left click on a link that loads in this tab (top frame only), as the URL it loads, or null.
-  function sameTabLink(event, anchor) {
-    if (!topFrame || !enabled || !event.isTrusted || event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null;
-    anchor ??= event.composedPath().find(value => value.localName === 'a' && value.hasAttribute('href'));
-    if (!anchor || anchor.hasAttribute('download') || !/^https?:/i.test(anchor.href)) return null;
-    const target = (anchor.getAttribute('target') ?? document.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase();
-    if (!['', '_self', '_top', '_parent'].includes(target) || /\bnoreferrer\b/i.test(anchor.rel ?? '') || anchor.hasAttribute('referrerpolicy')) return null;
-    return anchor.href;
+  // Whether another tab on this site already shows url: the link's own keys, as the background computes them.
+  function shownElsewhere(url) {
+    if (!rules || !reuseKeys.size) return false;
+    try {
+      const { normalizedKey, urlRules } = globalThis.linkReuseURLRules;
+      return [url, normalizedKey(url, rules), urlRules(url, rules).identity].some(key => key && reuseKeys.has(key));
+    } catch { return false; }
   }
 
-  // Selects the other tab that shows url; otherwise (no tab, failure, no answer within a second) resume() runs once.
-  function reuse(url, resume, resuming = false) {
+  // Hands the click to the extension: it is cancelled once the request is on its way, and settle() acts on the answer,
+  // however long that takes. A script disconnected by an extension update cannot send and leaves the click alone.
+  function handOver(event, message, settle) {
     let response;
-    try {
-      response = chrome.runtime.sendMessage({ type: 'page-navigate', url, deadline: Date.now() + 800, resuming });
-    } catch { enabled = false; return false; }
-    let settled = false;
-    const finish = reused => {
-      if (settled) return;
-      settled = true;
-      if (!reused) resume();
-    };
-    setTimeout(() => finish(false), 1000);
-    void response.then(reply => finish(reply?.result === 'focused'), () => finish(false));
+    try { response = chrome.runtime.sendMessage(message); } catch { enabled = false; return false; }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void response.then(settle, () => settle(null));
     return true;
-  }
-
-  // Pressing a same-tab link asks whether another tab already shows it; the answer normally arrives before the click.
-  function pressed(event) {
-    const url = sameTabLink(event);
-    if (!url) return;
-    const current = probe = { url };
-    try {
-      void chrome.runtime.sendMessage({ type: 'page-probe', url }).then(reply => { current.answer = reply?.result; }, () => {});
-    } catch { enabled = false; }
   }
 
   function open(event) {
@@ -78,46 +62,32 @@
     if (!anchor || anchor.hasAttribute('download')) return skip('anchor');
     const target = (anchor.getAttribute('target') ?? document.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase();
     if (!middle && !modified && target !== '_blank') {
-      // A plain same-tab link. Another tab already shows it: switch there before the page (or its router) sees the
-      // click, replaying the click if that fails. No other tab: leave the click alone. Not known yet: the navigate
-      // handler below decides once the click has become a real page load.
-      const url = sameTabLink(event, anchor);
-      const answer = url && probe?.url === url ? probe.answer : undefined;
-      probe = null;
-      if (answer === 'match' && reuse(url, () => anchor.isConnected ? anchor.click() : location.assign(url))) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      } else if (url && answer === undefined) clicked = { url, at: event.timeStamp, event };
+      // A plain same-tab link to a page another tab on this site shows: switch there before the page or its router sees
+      // the click. Should that tab be gone by then, the link loads here as an ordinary page load. Other links: untouched.
+      const url = anchor.href;
+      if (topFrame && ['', '_self', '_top', '_parent'].includes(target) && /^https?:/i.test(url) && shownElsewhere(url)) {
+        handOver(event, { type: 'page-navigate', url }, reply => { if (reply?.result !== 'focused') location.assign(url); });
+      }
       return skip('target');
     }
     let url;
     try { url = new URL(anchor.href); } catch { return skip('other'); }
     if (!['http:', 'https:'].includes(url.protocol)) return skip('other');
-    let response;
-    try {
-      response = chrome.runtime.sendMessage({ type: 'page-link', url: url.href, active: event.shiftKey || (!middle && !modified) });
-    } catch { enabled = false; return skip('disabled'); }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    void response.then(reply => { if (!['focused', 'moved', 'opened'].includes(reply?.result)) failed(); }).catch(failed);
+    if (!handOver(event, { type: 'page-link', url: url.href, active: event.shiftKey || (!middle && !modified) },
+      reply => { if (!['focused', 'moved', 'opened'].includes(reply?.result)) failed(); })) return skip('disabled');
   }
   window.addEventListener('click', open, true);
   window.addEventListener('auxclick', open, true);
 
-  window.addEventListener('pointerdown', pressed, { capture: true, passive: true });
-
-  // Fallback when the click came before the answer (a fast click or the keyboard): the navigate event fires once a
-  // click has really become a navigation. It is held while the extension checks, then resumes unchanged.
-  if (!topFrame || !globalThis.navigation) return;
-  navigation.addEventListener('navigate', event => {
-    const link = clicked;
-    clicked = null;
-    // The recorded trusted click identifies the user's link (Safari reports userInitiated false even for it). A link's
-    // own navigation starts after that click has finished dispatching, uncancelled, and leaves the document. A router's
-    // pushState does not: it runs inside a click handler, after the page cancelled the click, or within the document.
-    if (!link || event.timeStamp - link.at > 1000 || link.url !== event.destination.url ||
-        link.event.eventPhase || link.event.defaultPrevented || event.destination.sameDocument ||
-        !event.cancelable || event.navigationType !== 'push' || event.hashChange || event.formData || event.downloadRequest) return;
-    if (reuse(link.url, () => location.assign(link.url), true)) event.preventDefault();
+  if (!topFrame) return;
+  chrome.runtime.onMessage.addListener(message => {
+    if (message?.type === 'page-keys' && Array.isArray(message.keys)) reuseKeys = new Set(message.keys);
   });
+  try {
+    void chrome.runtime.sendMessage({ type: 'page-keys' }).then(reply => {
+      if (!reply || !Array.isArray(reply.keys)) return;
+      rules = reply.rules;
+      reuseKeys = new Set(reply.keys);
+    }, () => {});
+  } catch { enabled = false; }
 })();

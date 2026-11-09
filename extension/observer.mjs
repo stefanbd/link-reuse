@@ -3,17 +3,9 @@ export class RedirectObserver {
     this.maxSources = maxSources;
     this.tabs = new Map();
     this.pending = new Map();
-    this.expected = new Map();
-  }
-
-  // A same-tab navigation the extension held and resumed. Safari reports the held original as failed and does not
-  // report the resumed one before it commits, so its requested URL becomes the source of the tab's next commit.
-  expect(tabId, url) {
-    this.expected.set(tabId, { url, at: Date.now() });
   }
 
   before(event) {
-    if (this.expected.get(event.tabId)?.url !== event.url) this.expected.delete(event.tabId);
     this.pending.set(event.tabId, { source: event.url, previous: this.tabs.get(event.tabId), at: Date.now() });
   }
 
@@ -23,10 +15,7 @@ export class RedirectObserver {
     const reported = this.pending.get(event.tabId);
     const pending = reported && Date.now() - reported.at < 30000 ? reported : undefined;
     const previous = pending?.previous;
-    const expected = this.expected.get(event.tabId);
-    this.expected.delete(event.tabId);
     const sources = new Set([pending?.source ?? event.url]);
-    if (expected && Date.now() - expected.at < 15000) sources.add(expected.url);
     if (event.transitionQualifiers?.includes('client_redirect') && previous && !previous.interacted) {
       for (const source of previous.sources) sources.add(source);
       sources.add(previous.url);
@@ -67,8 +56,8 @@ export class RedirectObserver {
     if (tab?.documentId === documentId) tab.interacted = true;
   }
 
-  // A failed navigation leaves the current document. Its pending start and any expected resumed navigation stay (see
-  // committed), because Safari reports a cross-site process swap as a failure before the navigation commits.
+  // A failed navigation leaves the current document. Its pending start stays (see committed), because Safari reports a
+  // cross-site process swap as a failure before the navigation commits.
   failed(tabId) {
     this.tabs.delete(tabId);
   }
@@ -76,7 +65,6 @@ export class RedirectObserver {
   remove(tabId) {
     this.tabs.delete(tabId);
     this.pending.delete(tabId);
-    this.expected.delete(tabId);
   }
 
   aliases(tab) {

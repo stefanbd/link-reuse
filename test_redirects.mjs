@@ -56,34 +56,18 @@ test('closed tabs discard navigation state', () => {
   assert.deepEqual(observer.history(event(B)), []);
 });
 
-test('a resumed same-tab link learns its redirect though Safari reports the held original as failed', () => {
-  // Safari: onBeforeNavigate(A) for the held click, onErrorOccurred when it is cancelled, then the resumed navigation
-  // commits the redirected B with no onBeforeNavigate of its own.
+test('a redirect is learned though Safari reports a cross-site process swap as a failure before it commits', context => {
+  // Safari: onBeforeNavigate(A), onErrorOccurred as the navigation moves to another web process, then the commit of the
+  // redirected B with no onBeforeNavigate of its own.
   const safari = new RedirectObserver();
   safari.before(event(A));
-  safari.expect(1, A);
   safari.failed(1);
   assert.deepEqual(safari.committed(event(B, 'two', undefined)), [{ source: A, destination: B }]);
-  // Chromium reports the resumed navigation normally; the expectation adds nothing new.
-  const chromium = new RedirectObserver();
-  chromium.expect(1, A); chromium.before(event(A));
-  assert.deepEqual(chromium.committed(event(B)), [{ source: A, destination: B }]);
-});
-
-test('an expectation ends with another navigation, its own commit, tab closure or after fifteen seconds', context => {
-  const other = new RedirectObserver();
-  other.expect(1, A); other.before(event(C));
-  assert.deepEqual(other.committed(event(C)), []);
-  const same = new RedirectObserver();
-  same.expect(1, A);
-  assert.deepEqual(same.committed(event(A)), []);
-  assert.deepEqual(same.committed(event(B, 'two')), []);
-  const closed = new RedirectObserver();
-  closed.expect(1, A); closed.remove(1);
-  assert.deepEqual(closed.committed(event(B)), []);
+  // A start older than thirty seconds no longer stands for the navigation that commits.
   context.mock.timers.enable({ apis: ['Date'], now: 0 });
   const stale = new RedirectObserver();
-  stale.expect(1, A);
-  context.mock.timers.tick(15001);
-  assert.deepEqual(stale.committed(event(B)), []);
+  stale.before(event(A));
+  stale.failed(1);
+  context.mock.timers.tick(30001);
+  assert.deepEqual(stale.committed(event(B, 'two', undefined)), []);
 });

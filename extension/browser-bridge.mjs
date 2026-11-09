@@ -1,4 +1,5 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
+import { reuseIndex, siteOf, pageKeys } from './page-keys.mjs';
 
 export class BrowserBridge {
   constructor(policy, { connectPort, queryTabs, resetLearning, badge, browserAPI = globalThis.chrome, extensionVersion, reload,
@@ -8,6 +9,8 @@ export class BrowserBridge {
     this.learning.restore(learningState);
     this.saving = Promise.resolve();
     this.windowFocusOrder = new Map();
+    // What each page was last sent, so a pass messages only pages whose keys changed.
+    this.sentKeys = new Map();
     this.lastError = '';
     this.serial = Promise.resolve();
     this.pending = 0;
@@ -28,17 +31,48 @@ export class BrowserBridge {
     void this.connect().catch(() => {});
     const revision = this.revision;
     try {
-      // Nothing learned and nothing unsaved: there is nothing to check against open tabs.
-      if (!this.learning.records.size && this.learning.revision === this.savedRevision) return;
       const tabs = await this.queryTabs();
       if (revision === this.revision) {
         this.learning.prune(tabs);
+        this.publish(tabs);
         await this.persist();
       }
     } catch {} finally {
       this.maintaining = false;
     }
     if (revision !== this.revision && !this.timer) this.timer = setTimeout(() => void this.maintain(), 50);
+  }
+  /**
+   * Each page holds the match keys of the other tabs on its own site, so it decides a plain link click at the click,
+   * before the page or its router acts on it, with no round trip to race. Only pages whose keys changed are messaged.
+   */
+  publish(tabs) {
+    this.pageIndex = reuseIndex(tabs, this.learning);
+    const live = new Set(tabs.map(tab => tab.id));
+    for (const id of this.sentKeys.keys()) if (!live.has(id)) this.sentKeys.delete(id);
+    for (const tab of tabs) {
+      // A page's keys follow from its site's keys alone: an unchanged site needs no work for its pages, and a changed
+      // site messages only the pages whose own list changed.
+      const site = !tab.discarded && siteOf(this.pageIndex, tab);
+      const sent = this.sentKeys.get(tab.id);
+      if (!site || sent?.signature === site.signature) continue;
+      const keys = pageKeys(site, tab);
+      const list = JSON.stringify(keys);
+      this.sentKeys.set(tab.id, { signature: site.signature, list });
+      if (sent?.list === list) continue;
+      // A page without the script (opened before the extension loaded) gets its keys when it next loads.
+      void Promise.resolve().then(() => this.browserAPI.tabs.sendMessage(tab.id, { type: 'page-keys', keys }, { frameId: 0 }))
+        .catch(() => this.sentKeys.delete(tab.id));
+    }
+  }
+  /** A loading page's keys, from the last pass (a pending pass sends any change) or, in a fresh worker, current tabs. */
+  async keysFor(tab) {
+    this.pageIndex ??= reuseIndex(await this.queryTabs(), this.learning);
+    const site = siteOf(this.pageIndex, tab);
+    if (!site) return [];
+    const keys = pageKeys(site, tab);
+    this.sentKeys.set(tab.id, { signature: site.signature, list: JSON.stringify(keys) });
+    return keys;
   }
   /** User activity: reconnect if the helper connection is down, without a maintenance pass. */
   activity() { void this.connect().catch(() => {}); }
@@ -115,7 +149,7 @@ export class BrowserBridge {
       const parsed = new URL(url);
       if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(url).length > 65536) throw new Error('Invalid web link.');
       const result = await routeToTab(url, this.learning, this.browserAPI, this.windowFocusOrder, opening);
-      if (!opening.probe) this.changed();
+      this.changed();
       return result;
     });
     this.serial = result.catch(() => {}).finally(() => { this.pending--; });

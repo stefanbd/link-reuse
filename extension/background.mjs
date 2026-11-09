@@ -36,6 +36,10 @@ const ready = Promise.all([
   return { policy, bridge, platform: platform.os };
 });
 
+// What a page needs to compute a link's keys itself: the URL rules, without the learning limits.
+const pageRules = ({ maxURLBytes, noiseQueryKeys, noiseQueryPrefixes, identityRules }) =>
+  ({ maxURLBytes, noiseQueryKeys, noiseQueryPrefixes, identityRules });
+
 function navigate(event, operation) {
   if (event.frameId !== 0 || event.documentLifecycle === 'prerender') return;
   void ready.then(({ policy, bridge }) => {
@@ -85,25 +89,21 @@ const skipReasons = new Set(['disabled', 'prevented', 'other', 'button', 'anchor
 // A tab the browser opened from a page; with the page-link events this shows any duplicate the handler missed.
 chrome.tabs.onCreated?.addListener(tab => { void ready.then(({ bridge }) => bridge.trace('tab-created', tab.openerTabId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (['page-link-capability', 'page-link', 'page-navigate', 'page-probe'].includes(message.type) && sender.tab && !sender.tab.incognito) {
-    void ready.then(async ({ bridge, platform }) => {
+  if (['page-link-capability', 'page-link', 'page-navigate', 'page-keys'].includes(message.type) && sender.tab && !sender.tab.incognito) {
+    void ready.then(async ({ bridge, platform, policy }) => {
       if (message.type === 'page-link-capability') {
         if (sender.frameId === 0) bridge.trace('page-ready', sender.tab.id);
         return { enabled: true, platform };
       }
+      // A page starting up: its current keys, and the rules to compute a link's keys with.
+      if (message.type === 'page-keys') return sender.frameId === 0 ? { keys: await bridge.keysFor(sender.tab), rules: pageRules(policy) } : null;
       if (!bridge.open) throw new Error('Webpage link reuse is unavailable in this browser.');
-      // A same-tab link only ever switches to an existing tab (the page loads it itself otherwise); a probe only
-      // reports whether one exists.
-      const sameTab = ['page-navigate', 'page-probe'].includes(message.type);
+      // A same-tab link only ever switches to an existing tab, with no deadline; the page loads it itself otherwise.
+      const sameTab = message.type === 'page-navigate';
       if (sameTab && sender.frameId !== 0) return { result: 'none' };
-      const opening = !sameTab ? { sourceTabId: sender.tab.id, active: message.active !== false } :
-        { sourceTabId: sender.tab.id, reuseOnly: true, probe: message.type === 'page-probe',
-          deadline: Math.min(Number(message.deadline) || Date.now() + 800, Date.now() + 2000) };
-      if (opening.probe) return bridge.open(message.url, opening);
+      const opening = { sourceTabId: sender.tab.id, ...(sameTab ? { reuseOnly: true } : { active: message.active !== false }) };
       try {
         const reply = await bridge.open(message.url, opening);
-        // A resumed page load: the address the tab commits next is where this link leads.
-        if (reply.result === 'none' && message.resuming === true && Date.now() <= opening.deadline) observer.expect(sender.tab.id, message.url);
         if (reply.result !== 'none') bridge.trace('page-' + reply.result, sender.tab.id);
         return reply;
       } catch (error) { bridge.trace('page-failed', sender.tab.id); throw error; }

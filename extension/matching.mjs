@@ -51,24 +51,35 @@ export class LiveLearning {
     const format = target ? this.rules(target, this.policy) : direct;
     return { url, allowed: allowsLearning(url, this.policy), entry: format.entry, scope: format.scope, directEntry: direct.entry };
   }
+  /**
+   * A URL's match keys: its address, normalized address and identity, then those of every learned destination. They
+   * depend only on the learned records, so each URL is worked out once per learning revision, however often pruning,
+   * page keys and tab matching ask. Callers must not change the returned set.
+   */
   keys(value) {
-    const keys = new Set();
+    if (this.keyCache?.revision !== this.revision) this.keyCache = { revision: this.revision, keys: new Map() };
+    let keys = this.keyCache.keys.get(value);
+    if (keys) return keys;
+    keys = new Set();
     const pending = [urlKey(value)];
     while (pending.length && keys.size < 64) {
       const key = pending.pop();
       if (!key || keys.has(key)) continue;
+      const normalized = normalizedKey(key, this.policy);
       keys.add(key);
-      keys.add(normalizedKey(key, this.policy));
+      keys.add(normalized);
       const identity = this.rules(key, this.policy).identity;
       if (identity) keys.add(identity);
       for (const kind of ['redirect', 'canonical']) {
-        const destination = this.records.get(kind + '\n' + normalizedKey(key, this.policy))?.destination;
+        const destination = this.records.get(kind + '\n' + normalized)?.destination;
         if (destination) pending.push(destination);
       }
     }
+    this.keyCache.keys.set(value, keys);
     return keys;
   }
-  equivalent(left, right, keys = this.keys(left)) {
+  equivalent(left, right) {
+    const keys = this.keys(left);
     for (const key of this.keys(right)) if (keys.has(key)) return true;
     return false;
   }
@@ -80,12 +91,7 @@ export class LiveLearning {
       return current.scope === request.entry && (allowsLearning(value, this.policy) || current.directEntry === request.entry ||
         this.records.get('launch\n' + tab.id)?.entry === request.entry);
     }
-    return allowsLearning(value, this.policy) && this.equivalent(request.url, value, this.requestKeys(request));
-  }
-  // A request's keys are computed once per learning revision, however many tabs it is compared with.
-  requestKeys(request) {
-    if (request.revision !== this.revision) Object.assign(request, { keys: this.keys(request.url), revision: this.revision });
-    return request.keys;
+    return allowsLearning(value, this.policy) && this.equivalent(request.url, value);
   }
   rememberLaunch(tabId, request) {
     if (request.entry && Number.isInteger(tabId)) this.put('launch\n' + tabId, { tabId, entry: request.entry });
@@ -180,28 +186,33 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   const match = (preferred && learning.matches(request, preferred) && preferred) ||
     reusable.find(tab => urlKey(tab.pendingUrl || tab.url) === request.url && learning.matches(request, tab)) ||
     reusable.find(tab => learning.matches(request, tab));
-  if (opening.probe) return { result: match ? 'match' : 'none' };
   if (match) {
     const current = learning.addressed(await browser.tabs.get(match.id));
     if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
     if (opening.deadline && opening.deadline <= Date.now()) throw new Error('The external request expired. Please open the link again.');
-    // The match moves to where the clicked page would have opened: beside its source for a background click (which
-    // keeps the source in front) and for a same-tab link (which then selects it). Chromium regroups a moved tab by its
-    // new neighbours, so it moves only within its own group (or between ungrouped tabs); otherwise it is just focused.
-    // Safari has no groupId.
-    let { windowId, active } = current;
-    if ((opening.active === false || opening.reuseOnly) && source && current.id !== source.id &&
-        (current.groupId ?? -1) === (source.groupId ?? -1)) {
+    // The match goes where the clicked page would have opened: beside its source, for a background click (which keeps
+    // the source in front) and for a same-tab link. Chromium regroups a moved tab by its new neighbours, so it moves
+    // only within its own group (or between ungrouped tabs); a pinned tab or one already in place stays. Safari has no
+    // groupId.
+    const beside = (opening.active === false || opening.reuseOnly) && source && current.id !== source.id &&
+      (current.groupId ?? -1) === (source.groupId ?? -1);
+    let place = null;
+    if (beside) {
       const index = current.windowId === source.windowId && current.index < source.index ? source.index : source.index + 1;
-      if (current.pinned || (current.windowId === source.windowId && current.index === index)) {
-        if (opening.active === false) return { result: 'moved' };
-      } else if (await browser.tabs.move(current.id, { windowId: source.windowId, index }).then(() => true, () => false)) {
-        if (opening.active === false) return { result: 'moved' };
-        if (windowId !== source.windowId) ({ windowId, active } = { windowId: source.windowId, active: false });
-      }
+      if (!current.pinned && !(current.windowId === source.windowId && current.index === index)) place = { windowId: source.windowId, index };
     }
-    // Both requests go out at once; the browser applies them in order, saving a round trip.
-    await Promise.all([active || browser.tabs.update(match.id, { active: true }), activateWindow(windowId)]);
+    const move = () => browser.tabs.move(current.id, place).then(() => true, () => false);
+    // A background click's whole action is the move; only a match that cannot move is focused instead.
+    if (opening.active === false && beside && (!place || await move())) return { result: 'moved' };
+    // Focus is the priority: a same-tab link's move goes out with it, never ahead of it, and the browser applies the
+    // requests in order, so the selected tab still lands beside its source. A failed move never holds the focus up; a
+    // match that failed to move into the source window has its own window brought forward instead.
+    // For now a plain-click switch only focuses its match; moving it beside the source is to become an optional setting.
+    // const moving = opening.reuseOnly && place ? move() : null;
+    const moving = null;
+    const windowId = moving ? place.windowId : current.windowId;
+    await Promise.all([(current.active && !moving) || browser.tabs.update(match.id, { active: true }), activateWindow(windowId)]);
+    if (moving && windowId !== current.windowId && !await moving) await activateWindow(current.windowId);
     return { result: 'focused' };
   }
   if (opening.reuseOnly) return { result: 'none' };

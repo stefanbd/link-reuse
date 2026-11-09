@@ -52,3 +52,23 @@ test('the content script uses Open Graph only when no canonical is declared', ()
   const filter = Array.from(readMetadata([], []).observed.attributeFilter);
   assert.ok(filter.includes('content') && filter.includes('property'));
 });
+
+test('page scripts left behind by an extension reload neither throw nor keep watching the page', () => {
+  const invalidated = () => { throw new Error('Extension context invalidated.'); };
+  let disconnected = false;
+  let onMutation;
+  vm.runInNewContext(readFileSync(new URL('./extension/canonical.js', import.meta.url), 'utf8'), {
+    location: { href: 'https://shop.test/item' },
+    document: { readyState: 'complete', head: { querySelectorAll: () => [] } },
+    MutationObserver: class { constructor(fn) { onMutation = fn; } observe() {} disconnect() { disconnected = true; } },
+    chrome: { runtime: { onMessage: { addListener() {} }, sendMessage: invalidated } },
+  });
+  assert.equal(disconnected, true);
+  assert.doesNotThrow(() => onMutation());
+  const listeners = new Map();
+  vm.runInNewContext(readFileSync(new URL('./extension/interaction.js', import.meta.url), 'utf8'), {
+    window: { addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener() {} },
+    chrome: { runtime: { onMessage: { addListener() {} }, sendMessage: invalidated } },
+  });
+  assert.doesNotThrow(() => listeners.get('pointerdown')({ isTrusted: true }));
+});

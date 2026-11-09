@@ -1,5 +1,5 @@
 (() => {
-  let previous;
+  let previous, observer;
   function report() {
     if (!document.head) return;
     const canonical = [...document.head.querySelectorAll('link[rel~="canonical" i]')].slice(0, 2).map(link => link.href);
@@ -10,11 +10,13 @@
     const key = JSON.stringify(message);
     if (key === previous) return;
     previous = key;
-    chrome.runtime.sendMessage(message).catch(() => {});
+    // A script left behind by an extension reload cannot send (it throws instead of rejecting), so it stops watching.
+    try { void chrome.runtime.sendMessage(message).catch(() => {}); } catch { observer?.disconnect(); }
   }
   function observe() {
     if (!document.head) return;
-    new MutationObserver(report).observe(document.head, {
+    observer = new MutationObserver(report);
+    observer.observe(document.head, {
       subtree: true, childList: true, attributes: true, attributeFilter: ['href', 'rel', 'content', 'property'],
     });
     report();

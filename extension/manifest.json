@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Link Reuse",
-  "version": "3.2.51",
+  "version": "3.2.52",
   "description": "Reuse existing tabs for web links using observed redirects and same-resource URLs stored locally.",
   "permissions": [
     "webNavigation",
@@ -21,7 +21,8 @@
       ],
       "js": [
         "interaction.js",
-        "canonical.js"
+        "canonical.js",
+        "url-rules.js"
       ],
       "run_at": "document_start"
     },

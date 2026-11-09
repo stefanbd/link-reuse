@@ -4,6 +4,9 @@ import { readFileSync } from 'node:fs';
 import { LiveLearning, routeToTab } from './extension/matching.mjs';
 import { BrowserBridge as WindowsBridge } from './extension/browser-bridge.mjs';
 import { urlRules } from './extension/url-rules.mjs';
+import { reuseIndex, siteOf, pageKeys } from './extension/page-keys.mjs';
+
+const keysOf = (index, tab) => { const site = siteOf(index, tab); return site && pageKeys(site, tab); };
 import { safariTransport } from './test_safari_support.mjs';
 
 const policy = JSON.parse(readFileSync(new URL('./extension/learning-policy.json', import.meta.url)));
@@ -934,19 +937,54 @@ test('a slow browser never has more than one tab-maintenance query in flight, pl
   assert.equal(queries.length, 2);
 });
 
-test('with nothing learned and nothing unsaved, maintenance never lists tabs', async context => {
+test('a maintenance pass messages only the pages whose keys changed, and a loading page gets them from that pass', async context => {
   const pending = timers(context);
-  const h = browser([{ url: 'https://example.test/item' }]);
+  const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }, { url: 'https://other.test/c' },
+    { url: 'https://example.test/d', discarded: true }]);
+  const messages = [];
+  h.api.tabs.sendMessage = async (id, message, options) => { messages.push([id, message.keys, options]); };
   let queries = 0;
   const { bridge } = sessionBridge(h, learningSession(), { queryTabs: async () => { queries++; return h.tabs.map(tab => ({ ...tab })); } });
   const fire = async () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } await new Promise(setImmediate); await bridge.saving; };
   await fire();
-  const afterFirstSave = queries;
+  // Each page gets the keys of the other tabs on its own site; the sleeping tab is listed but never contacted.
+  const keysOf = id => messages.filter(([tab]) => tab === id).map(([, keys]) => keys);
+  assert.deepEqual(keysOf(1), [['https://example.test/b', 'https://example.test/d']]);
+  assert.deepEqual(keysOf(2), [['https://example.test/a', 'https://example.test/d']]);
+  assert.deepEqual(keysOf(3), [[]]);
+  assert.deepEqual(keysOf(4), []);
+  assert.ok(messages.every(([, , options]) => options.frameId === 0));
+  // Nothing changed for any page: no messages, however many passes.
+  messages.length = 0;
   for (let i = 0; i < 3; i++) { bridge.changed(); await fire(); }
-  assert.equal(queries, afterFirstSave);
-  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/item' }]);
+  assert.deepEqual(messages, []);
+  // A learned link to b reaches a's page only.
+  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/b' }]);
   await fire();
-  assert.equal(queries, afterFirstSave + 1);
+  assert.deepEqual(messages.map(([id]) => id), [1]);
+  assert.ok(messages[0][1].includes('https://example.test/short'));
+  // A page that loads is answered from the last pass without another tab query, and is not messaged again unchanged.
+  const before = queries;
+  assert.deepEqual(await bridge.keysFor({ id: 3, url: 'https://other.test/c' }), []);
+  assert.equal(queries, before);
+  messages.length = 0;
+  bridge.changed(); await fire();
+  assert.deepEqual(messages, []);
+});
+
+test('a page whose script is unreachable is retried on the next pass instead of being marked as sent', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }]);
+  let reachable = false;
+  const messages = [];
+  h.api.tabs.sendMessage = async id => { if (!reachable) throw new Error('Receiving end does not exist.'); messages.push(id); };
+  const { bridge } = sessionBridge(h, learningSession());
+  const fire = async () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } await new Promise(setImmediate); await new Promise(setImmediate); };
+  await fire();
+  assert.equal(bridge.sentKeys.size, 0);
+  reachable = true;
+  bridge.changed(); await fire();
+  assert.deepEqual(messages, [1, 2]);
 });
 
 test('rapid repeat clicks reuse a just-created tab that Safari still lists without an address', async () => {
@@ -983,32 +1021,70 @@ test('a background match moves only within its own tab group or between ungroupe
   }
 });
 
-test('a same-tab link switches to another tab showing it, moved beside the source, and never opens a tab', async () => {
+test('a same-tab link switches to another tab showing it where it is, and never opens a tab', async () => {
   const route = (h, url) => routeToTab(url, new LiveLearning(policy), h.api, new Map(), { sourceTabId: 1, reuseOnly: true }).then(value => value.result);
   let h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }, { url: 'https://example.test/new' }]);
   assert.equal(await route(h, 'https://example.test/new'), 'focused');
-  assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }], ['focus', 3, { active: true }]]);
+  assert.deepEqual(h.calls, [['focus', 3, { active: true }]]);
   // No other tab shows it, or only the source does: the page resumes its own navigation.
   for (const url of ['https://example.test/missing', 'https://example.test/source']) {
     h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }]);
     assert.equal(await route(h, url), 'none');
     assert.deepEqual(h.calls, []);
   }
-  // Another tab group: focused where it is. Another window: brought beside the source and selected there.
+  // Another tab group: focused where it is. Another window, where it is already selected: that window comes forward.
   h = browser([{ url: 'https://example.test/source', active: true, groupId: 4 }, { url: 'https://example.test/new', groupId: 5 }]);
   assert.equal(await route(h, 'https://example.test/new'), 'focused');
   assert.deepEqual(h.calls, [['focus', 2, { active: true }]]);
   h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/new', windowId: 2, active: true }],
     [{ id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' }]);
   assert.equal(await route(h, 'https://example.test/new'), 'focused');
-  assert.deepEqual(h.calls, [['move', 2, { windowId: 1, index: 1 }], ['focus', 2, { active: true }]]);
+  assert.deepEqual(h.calls, [['window', 2, { focused: true }]]);
 });
 
-test('a probe reports whether another tab shows the link without moving or focusing anything', async () => {
-  const h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/new' }]);
-  const probe = url => routeToTab(url, new LiveLearning(policy), h.api, new Map(), { sourceTabId: 1, reuseOnly: true, probe: true }).then(value => value.result);
-  assert.equal(await probe('https://example.test/new'), 'match');
-  assert.equal(await probe('https://example.test/source'), 'none');
-  assert.equal(await probe('https://example.test/missing'), 'none');
-  assert.deepEqual(h.calls, []);
+// Plain-click moves are switched off in routeToTab until they become an optional setting; re-enable with it.
+test.skip('a same-tab switch never waits for the move: focus goes out with it, and a failed move still focuses', async () => {
+  const route = h => routeToTab('https://example.test/new', new LiveLearning(policy), h.api, new Map(), { sourceTabId: 1, reuseOnly: true });
+  // The browser has not finished (or never finishes) the move: the focus request is already out.
+  let h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }, { url: 'https://example.test/new' }]);
+  h.api.tabs.move = (id, change) => { h.calls.push(['move', id, change]); return new Promise(() => {}); };
+  assert.equal((await route(h)).result, 'focused');
+  assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }], ['focus', 3, { active: true }]]);
+  // A refused move in the same window: the tab is selected where it is.
+  h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/a' }, { url: 'https://example.test/new' }]);
+  h.api.tabs.move = async (id, change) => { h.calls.push(['move', id, change]); throw new Error('Tabs cannot be edited right now.'); };
+  assert.equal((await route(h)).result, 'focused');
+  assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }], ['focus', 3, { active: true }]]);
+  // A refused move from another window: the match is selected there and its own window comes forward.
+  h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/new', windowId: 2 }],
+    [{ id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' }]);
+  h.api.tabs.move = async (id, change) => { h.calls.push(['move', id, change]); throw new Error('Tabs cannot be edited right now.'); };
+  assert.equal((await route(h)).result, 'focused');
+  assert.deepEqual(h.calls, [['move', 2, { windowId: 1, index: 1 }], ['focus', 2, { active: true }], ['window', 2, { focused: true }]]);
+});
+
+test('pages get the match keys of other tabs on their own site only, including learned links that lead there', async () => {
+  const learning = new LiveLearning(policy);
+  learning.observe([{ kind: 'redirect', source: 'https://acme.atlassian.net/l/short', destination: 'https://acme.atlassian.net/browse/OPS-7' }]);
+  const tabs = [
+    { id: 1, url: 'https://acme.atlassian.net/browse/OPS-1' },
+    { id: 2, url: 'https://acme.atlassian.net/browse/ops-7' },
+    { id: 3, url: 'https://github.com/acme/app/pull/9' },
+    { id: 4, url: 'https://acme.atlassian.net/login?token=secret' },
+    { id: 5, url: 'https://acme.atlassian.net/browse/OPS-9', incognito: true },
+  ];
+  const index = reuseIndex(tabs, learning);
+  const jira = keysOf(index, tabs[0]);
+  // OPS-7's address, normalized address and issue identity, and the learned short link: nothing from GitHub, the login
+  // page or the private tab, and not the page's own issue.
+  assert.ok(jira.includes('https://acme.atlassian.net/browse/ops-7'));
+  assert.ok(jira.includes(JSON.stringify(['jira-issue', 'https://acme.atlassian.net', 'OPS-7', '', ''])));
+  assert.ok(jira.includes('https://acme.atlassian.net/l/short'));
+  assert.ok(!jira.some(key => key.includes('OPS-1') || key.includes('github') || key.includes('login') || key.includes('OPS-9')));
+  assert.deepEqual(keysOf(index, tabs[2]), []);
+  assert.equal(keysOf(index, tabs[4]), null);
+  assert.equal(keysOf(index, { id: 6, url: 'chrome://newtab/' }), null);
+  // Two tabs on one issue: each page sees the other one.
+  const twin = reuseIndex([{ id: 1, url: 'https://example.test/a' }, { id: 2, url: 'https://example.test/a' }], learning);
+  assert.deepEqual(keysOf(twin, { id: 1, url: 'https://example.test/a' }), ['https://example.test/a']);
 });
