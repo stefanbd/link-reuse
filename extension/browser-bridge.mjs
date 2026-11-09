@@ -115,7 +115,7 @@ export class BrowserBridge {
       const parsed = new URL(url);
       if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(url).length > 65536) throw new Error('Invalid web link.');
       const result = await routeToTab(url, this.learning, this.browserAPI, this.windowFocusOrder, opening);
-      this.changed();
+      if (!opening.probe) this.changed();
       return result;
     });
     this.serial = result.catch(() => {}).finally(() => { this.pending--; });

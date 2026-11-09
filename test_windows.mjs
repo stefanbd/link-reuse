@@ -1003,3 +1003,12 @@ test('a same-tab link switches to another tab showing it, moved beside the sourc
   assert.equal(await route(h, 'https://example.test/new'), 'focused');
   assert.deepEqual(h.calls, [['move', 2, { windowId: 1, index: 1 }], ['focus', 2, { active: true }]]);
 });
+
+test('a probe reports whether another tab shows the link without moving or focusing anything', async () => {
+  const h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/new' }]);
+  const probe = url => routeToTab(url, new LiveLearning(policy), h.api, new Map(), { sourceTabId: 1, reuseOnly: true, probe: true }).then(value => value.result);
+  assert.equal(await probe('https://example.test/new'), 'match');
+  assert.equal(await probe('https://example.test/source'), 'none');
+  assert.equal(await probe('https://example.test/missing'), 'none');
+  assert.deepEqual(h.calls, []);
+});

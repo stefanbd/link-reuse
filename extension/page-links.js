@@ -5,6 +5,7 @@
   let enabled = true;
   const mac = /^Mac/.test(navigator.platform);
   const topFrame = window.top === window;
+  let probe = null;
   let clicked = null;
 
   // URL-free note of why a new-tab gesture was left to the browser, for the native diagnostics log.
@@ -27,6 +28,43 @@
     document.documentElement.append(notice);
   }
 
+  // A plain left click on a link that loads in this tab (top frame only), as the URL it loads, or null.
+  function sameTabLink(event, anchor) {
+    if (!topFrame || !enabled || !event.isTrusted || event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null;
+    anchor ??= event.composedPath().find(value => value.localName === 'a' && value.hasAttribute('href'));
+    if (!anchor || anchor.hasAttribute('download') || !/^https?:/i.test(anchor.href)) return null;
+    const target = (anchor.getAttribute('target') ?? document.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase();
+    if (!['', '_self', '_top', '_parent'].includes(target) || /\bnoreferrer\b/i.test(anchor.rel ?? '') || anchor.hasAttribute('referrerpolicy')) return null;
+    return anchor.href;
+  }
+
+  // Selects the other tab that shows url; otherwise (no tab, failure, no answer within a second) resume() runs once.
+  function reuse(url, resume, resuming = false) {
+    let response;
+    try {
+      response = chrome.runtime.sendMessage({ type: 'page-navigate', url, deadline: Date.now() + 800, resuming });
+    } catch { enabled = false; return false; }
+    let settled = false;
+    const finish = reused => {
+      if (settled) return;
+      settled = true;
+      if (!reused) resume();
+    };
+    setTimeout(() => finish(false), 1000);
+    void response.then(reply => finish(reply?.result === 'focused'), () => finish(false));
+    return true;
+  }
+
+  // Pressing a same-tab link asks whether another tab already shows it; the answer normally arrives before the click.
+  function pressed(event) {
+    const url = sameTabLink(event);
+    if (!url) return;
+    const current = probe = { url };
+    try {
+      void chrome.runtime.sendMessage({ type: 'page-probe', url }).then(reply => { current.answer = reply?.result; }, () => {});
+    } catch { enabled = false; }
+  }
+
   function open(event) {
     const gesture = event.isTrusted && (event.metaKey || event.ctrlKey || (event.type === 'auxclick' && event.button === 1));
     const skip = reason => { if (gesture) skipped(reason); };
@@ -40,11 +78,16 @@
     if (!anchor || anchor.hasAttribute('download')) return skip('anchor');
     const target = (anchor.getAttribute('target') ?? document.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase();
     if (!middle && !modified && target !== '_blank') {
-      // A plain same-tab link: the navigate handler below may switch to a tab that already shows it.
-      if (topFrame && /^https?:/i.test(anchor.href) && ['', '_self', '_top', '_parent'].includes(target) &&
-          !/\bnoreferrer\b/i.test(anchor.rel ?? '') && !anchor.hasAttribute('referrerpolicy')) {
-        clicked = { url: anchor.href, at: event.timeStamp };
-      }
+      // A plain same-tab link. Another tab already shows it: switch there before the page (or its router) sees the
+      // click, replaying the click if that fails. No other tab: leave the click alone. Not known yet: the navigate
+      // handler below decides once the click has become a real page load.
+      const url = sameTabLink(event, anchor);
+      const answer = url && probe?.url === url ? probe.answer : undefined;
+      probe = null;
+      if (answer === 'match' && reuse(url, () => anchor.isConnected ? anchor.click() : location.assign(url))) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      } else if (url && answer === undefined) clicked = { url, at: event.timeStamp, event };
       return skip('target');
     }
     let url;
@@ -61,28 +104,20 @@
   window.addEventListener('click', open, true);
   window.addEventListener('auxclick', open, true);
 
-  // The navigate event fires only once a click has really become a navigation, after the page's own handlers (so
-  // client-side routing is untouched). It is cancelled while the extension checks for a tab already showing the
-  // destination; without one, or without an answer within a second, the navigation resumes unchanged.
+  window.addEventListener('pointerdown', pressed, { capture: true, passive: true });
+
+  // Fallback when the click came before the answer (a fast click or the keyboard): the navigate event fires once a
+  // click has really become a navigation. It is held while the extension checks, then resumes unchanged.
   if (!topFrame || !globalThis.navigation) return;
   navigation.addEventListener('navigate', event => {
     const link = clicked;
     clicked = null;
-    // The recorded trusted click identifies the user's link; Safari reports userInitiated false even for it.
-    if (!enabled || !link || event.timeStamp - link.at > 1000 || link.url !== event.destination.url ||
+    // The recorded trusted click identifies the user's link (Safari reports userInitiated false even for it). A link's
+    // own navigation starts after that click has finished dispatching, uncancelled, and leaves the document. A router's
+    // pushState does not: it runs inside a click handler, after the page cancelled the click, or within the document.
+    if (!link || event.timeStamp - link.at > 1000 || link.url !== event.destination.url ||
+        link.event.eventPhase || link.event.defaultPrevented || event.destination.sameDocument ||
         !event.cancelable || event.navigationType !== 'push' || event.hashChange || event.formData || event.downloadRequest) return;
-    let response;
-    try {
-      response = chrome.runtime.sendMessage({ type: 'page-navigate', url: link.url, deadline: Date.now() + 800 });
-    } catch { enabled = false; return; }
-    event.preventDefault();
-    let settled = false;
-    const finish = reused => {
-      if (settled) return;
-      settled = true;
-      if (!reused) location.assign(link.url);
-    };
-    setTimeout(() => finish(false), 1000);
-    void response.then(reply => finish(reply?.result === 'focused'), () => finish(false));
+    if (reuse(link.url, () => location.assign(link.url), true)) event.preventDefault();
   });
 })();

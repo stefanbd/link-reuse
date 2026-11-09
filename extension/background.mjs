@@ -58,7 +58,7 @@ chrome.webNavigation.onCommitted.addListener(event => navigate(event, 'committed
 chrome.webNavigation.onHistoryStateUpdated?.addListener(event => navigate(event, 'history'));
 chrome.webNavigation.onReferenceFragmentUpdated?.addListener(event => navigate(event, 'history'));
 chrome.webNavigation.onErrorOccurred.addListener(event => {
-  if (event.frameId === 0) { observer.remove(event.tabId); void ready.then(({ bridge }) => bridge.changed()); }
+  if (event.frameId === 0) { observer.failed(event.tabId); void ready.then(({ bridge }) => bridge.changed()); }
 });
 chrome.tabs.onRemoved.addListener(tabId => { observer.remove(tabId); void ready.then(({ bridge }) => bridge.changed()); });
 chrome.tabs.onUpdated.addListener((tabId, change) => {
@@ -85,20 +85,25 @@ const skipReasons = new Set(['disabled', 'prevented', 'other', 'button', 'anchor
 // A tab the browser opened from a page; with the page-link events this shows any duplicate the handler missed.
 chrome.tabs.onCreated?.addListener(tab => { void ready.then(({ bridge }) => bridge.trace('tab-created', tab.openerTabId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (['page-link-capability', 'page-link', 'page-navigate'].includes(message.type) && sender.tab && !sender.tab.incognito) {
+  if (['page-link-capability', 'page-link', 'page-navigate', 'page-probe'].includes(message.type) && sender.tab && !sender.tab.incognito) {
     void ready.then(async ({ bridge, platform }) => {
       if (message.type === 'page-link-capability') {
         if (sender.frameId === 0) bridge.trace('page-ready', sender.tab.id);
         return { enabled: true, platform };
       }
       if (!bridge.open) throw new Error('Webpage link reuse is unavailable in this browser.');
-      // A same-tab navigation only ever switches to an existing tab; the page resumes it when nothing matches.
-      const opening = message.type === 'page-navigate' ?
-        { sourceTabId: sender.tab.id, reuseOnly: true, deadline: Math.min(Number(message.deadline) || Date.now() + 800, Date.now() + 2000) } :
-        { sourceTabId: sender.tab.id, active: message.active !== false };
-      if (opening.reuseOnly && sender.frameId !== 0) return { result: 'none' };
+      // A same-tab link only ever switches to an existing tab (the page loads it itself otherwise); a probe only
+      // reports whether one exists.
+      const sameTab = ['page-navigate', 'page-probe'].includes(message.type);
+      if (sameTab && sender.frameId !== 0) return { result: 'none' };
+      const opening = !sameTab ? { sourceTabId: sender.tab.id, active: message.active !== false } :
+        { sourceTabId: sender.tab.id, reuseOnly: true, probe: message.type === 'page-probe',
+          deadline: Math.min(Number(message.deadline) || Date.now() + 800, Date.now() + 2000) };
+      if (opening.probe) return bridge.open(message.url, opening);
       try {
         const reply = await bridge.open(message.url, opening);
+        // A resumed page load: the address the tab commits next is where this link leads.
+        if (reply.result === 'none' && message.resuming === true && Date.now() <= opening.deadline) observer.expect(sender.tab.id, message.url);
         if (reply.result !== 'none') bridge.trace('page-' + reply.result, sender.tab.id);
         return reply;
       } catch (error) { bridge.trace('page-failed', sender.tab.id); throw error; }

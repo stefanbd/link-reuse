@@ -6,8 +6,8 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('./extension/page-links.js', import.meta.url), 'utf8');
 const settle = () => new Promise(setImmediate);
 
-function harness({ platform = 'win', reply = { result: 'focused' }, baseTarget, broken = false, framed = false } = {}) {
-  const listeners = new Map(), sent = [], notices = [], skips = [], assigned = [], timers = [];
+function harness({ platform = 'win', reply = { result: 'focused' }, probe = { result: 'none' }, baseTarget, broken = false, framed = false } = {}) {
+  const listeners = new Map(), sent = [], notices = [], skips = [], assigned = [], timers = [], probes = [], replays = [];
   let navigateListener;
   const node = () => ({ style: {}, setAttribute() {}, addEventListener() {}, append() {}, remove() {} });
   const document = {
@@ -17,6 +17,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, baseTarget, 
   };
   const runtime = { sendMessage(message) {
     if (message.type === 'page-skip') { skips.push(message.reason); return Promise.resolve(); }
+    if (message.type === 'page-probe') { probes.push(message.url); return probe instanceof Promise ? probe : Promise.resolve(probe); }
     sent.push(message);
     if (broken) throw new Error('Extension context invalidated.');
     return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
@@ -27,7 +28,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, baseTarget, 
     navigation: { addEventListener(type, fn) { if (type === 'navigate') navigateListener = fn; } },
     location: { assign: url => assigned.push(url) }, setTimeout: fn => timers.push(fn), Date });
   const click = (attributes = {}, change = {}) => {
-    const anchor = { localName: 'a', href: 'https://example.test/item', rel: attributes.rel ?? '',
+    const anchor = { localName: 'a', href: 'https://example.test/item', rel: attributes.rel ?? '', isConnected: true, click() { replays.push(this.href); },
       hasAttribute: name => name === 'href' || name in attributes,
       getAttribute: name => attributes[name] ?? null };
     const event = { type: 'click', button: 0, isTrusted: true, defaultPrevented: false, timeStamp: 0,
@@ -44,7 +45,10 @@ function harness({ platform = 'win', reply = { result: 'focused' }, baseTarget, 
     navigateListener?.(event);
     return event;
   };
-  return { click, navigate, sent, notices, skips, assigned, timers };
+  // Pressing the primary button on the link (pointerdown), which asks whether another tab already shows it.
+  const press = () => listeners.get('pointerdown')({ type: 'pointerdown', button: 0, isTrusted: true, ctrlKey: false, metaKey: false, altKey: false,
+    shiftKey: false, composedPath: () => [{ localName: 'a', href: 'https://example.test/item', rel: '', hasAttribute: name => name === 'href', getAttribute: () => null }] });
+  return { click, press, navigate, sent, notices, skips, assigned, timers, probes, replays };
 }
 
 test('new-tab webpage gestures cancel the default before requesting one shared route', async () => {
@@ -183,4 +187,61 @@ test('Safari reports a link click navigation as not user-initiated; the recorded
   h.click();
   assert.equal(h.navigate({ userInitiated: false }).cancelled, true);
   assert.equal(h.sent[0].type, 'page-navigate');
+});
+
+test('pressing a link another tab already shows switches at the click, before the page or its router sees it', async () => {
+  const h = harness({ probe: { result: 'match' }, reply: { result: 'focused' } });
+  h.press();
+  assert.deepEqual(h.probes, ['https://example.test/item']);
+  await settle();
+  const clicked = h.click();
+  assert.equal(clicked.cancelled, true);
+  assert.equal(clicked.stopped, true);
+  assert.equal(h.sent[0].type, 'page-navigate');
+  assert.equal(h.sent[0].resuming, false);
+  await settle();
+  assert.deepEqual(h.replays, []);
+  assert.equal(h.navigate().cancelled, undefined);
+});
+
+test('a switch that finds no tab, fails or gets no answer within a second replays the click for the page', async () => {
+  for (const reply of [{ result: 'none' }, new Error('Connection closed.'), new Promise(() => {})]) {
+    const h = harness({ probe: { result: 'match' }, reply });
+    h.press();
+    await settle();
+    assert.equal(h.click().cancelled, true);
+    await settle();
+    h.timers.forEach(fn => fn());
+    await settle();
+    assert.deepEqual(h.replays, ['https://example.test/item']);
+    assert.deepEqual(h.assigned, []);
+  }
+});
+
+test('pressing a link no other tab shows leaves the click, the router and the page load alone', async () => {
+  const h = harness({ probe: { result: 'none' } });
+  h.press();
+  await settle();
+  assert.equal(h.click().cancelled, undefined);
+  assert.equal(h.navigate().cancelled, undefined);
+  assert.equal(h.sent.length, 0);
+});
+
+test('a click before the answer arrives falls back to holding the page load', async () => {
+  const h = harness({ probe: new Promise(() => {}), reply: { result: 'focused' } });
+  h.press();
+  assert.equal(h.click().cancelled, undefined);
+  assert.equal(h.navigate().cancelled, true);
+  assert.equal(h.sent[0].resuming, true);
+});
+
+test('a router navigation after the click is never held: same-document, during the click or after the page cancelled it', async () => {
+  for (const [click, navigation] of [[{}, { destination: { url: 'https://example.test/item', sameDocument: true } }],
+    [{ eventPhase: 2 }, {}], [{ defaultPrevented: true }, {}]]) {
+    const h = harness();
+    const clicked = h.click();
+    Object.assign(clicked, click);
+    assert.equal(h.navigate(navigation).cancelled, undefined, JSON.stringify(click));
+    assert.equal(h.sent.length, 0);
+  }
 });

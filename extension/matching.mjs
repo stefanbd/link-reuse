@@ -180,6 +180,7 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   const match = (preferred && learning.matches(request, preferred) && preferred) ||
     reusable.find(tab => urlKey(tab.pendingUrl || tab.url) === request.url && learning.matches(request, tab)) ||
     reusable.find(tab => learning.matches(request, tab));
+  if (opening.probe) return { result: match ? 'match' : 'none' };
   if (match) {
     const current = learning.addressed(await browser.tabs.get(match.id));
     if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
