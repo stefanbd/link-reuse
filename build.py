@@ -8,11 +8,12 @@ import pathlib
 import plistlib
 import shutil
 import subprocess
-from install import unregister
+from install import BUILT_APP, unregister
 
 ROOT = pathlib.Path(__file__).resolve().parent
 BUILD = ROOT / 'build'
-APP = BUILD / 'Link Reuse.app'
+APP = BUILT_APP
+PRODUCTS = APP.parent
 
 
 def prepare():
@@ -66,14 +67,17 @@ def main():
     parser.add_argument('--sign', default='-', help='Code-signing identity; defaults to ad-hoc development signing.')
     args = parser.parse_args()
     extension_id = prepare()
+    # Xcode registers every macOS app it builds with LaunchServices (no setting disables it). A second registered
+    # copy of the Safari extension makes PlugInKit kill the live one on each link, so Safari reloads every extension
+    # mid-request. Undo the registration here; the `.noindex` products folder stops Spotlight re-registering it.
     if APP.exists(): unregister(APP)
-    for product in [APP, BUILD / 'LinkReuseSafari.appex']:
+    for product in [APP, PRODUCTS / 'LinkReuseSafari.appex']:
         if product.exists(): shutil.rmtree(product)
     try:
         subprocess.run(['xcodebuild', '-project', str(ROOT / 'LinkReuse.xcodeproj'), '-scheme', 'Link Reuse',
                         '-configuration', 'Release', '-destination', 'generic/platform=macOS', '-derivedDataPath', str(BUILD / 'derived'),
                         'ARCHS=arm64 x86_64', 'ONLY_ACTIVE_ARCH=NO', 'CODE_SIGNING_ALLOWED=NO',
-                        'CONFIGURATION_BUILD_DIR=' + str(BUILD), '-quiet', 'build'], check=True, cwd=ROOT)
+                        'CONFIGURATION_BUILD_DIR=' + str(PRODUCTS), '-quiet', 'build'], check=True, cwd=ROOT)
         for name, destination in [('app', APP / 'Contents/Resources'),
                                   ('safari', APP / 'Contents/PlugIns/LinkReuseSafari.appex/Contents/Resources')]:
             expected = {p.relative_to(BUILD / (name + '-resources')): p.read_bytes() for p in (BUILD / (name + '-resources')).rglob('*') if p.is_file()}

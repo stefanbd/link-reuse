@@ -18,6 +18,30 @@ export async function permittedTabs(browser, query = {}) {
 export class LiveLearning {
   constructor(policy, rules = urlRules) {
     this.policy = policy; this.rules = rules; this.records = new Map(); this.settledURLs = new Map(); this.bytes = 0; this.revision = 0;
+    // Tabs opened here whose address the browser has not reported yet: Safari lists a new tab without a URL (and has
+    // no pendingUrl) until its navigation commits, so a rapid repeat would otherwise open the link again.
+    this.created = new Map();
+  }
+  /** The tab with its requested URL standing in until the browser reports an address. */
+  addressed(tab) {
+    const url = tab && this.created.get(tab.id);
+    return url && !urlKey(tab.pendingUrl || tab.url) ? { ...tab, pendingUrl: url } : tab;
+  }
+  async withCreated(tabs, browser) {
+    if (!this.created.size) return tabs;
+    const listed = new Set(tabs.map(tab => tab.id));
+    const unlisted = await Promise.all([...this.created.keys()].filter(id => !listed.has(id)).map(id => browser.tabs.get(id).catch(() => null)));
+    const all = [...tabs, ...unlisted.filter(tab => tab && !tab.incognito)];
+    for (const id of this.created.keys()) {
+      const tab = all.find(value => value.id === id);
+      if (!tab || urlKey(tab.pendingUrl || tab.url)) this.created.delete(id);
+    }
+    return all.map(tab => this.addressed(tab));
+  }
+  rememberCreated(tabId, url) {
+    if (!Number.isInteger(tabId)) return;
+    this.created.set(tabId, url);
+    if (this.created.size > 64) this.created.delete(this.created.keys().next().value);
   }
   resolve(value) {
     const original = urlKey(value);
@@ -44,9 +68,9 @@ export class LiveLearning {
     }
     return keys;
   }
-  equivalent(left, right) {
-    const keys = this.keys(left);
-    return [...this.keys(right)].some(key => keys.has(key));
+  equivalent(left, right, keys = this.keys(left)) {
+    for (const key of this.keys(right)) if (keys.has(key)) return true;
+    return false;
   }
   matches(request, tab) {
     if (!tab || tab.incognito || (!request.allowed && !request.entry)) return false;
@@ -56,7 +80,12 @@ export class LiveLearning {
       return current.scope === request.entry && (allowsLearning(value, this.policy) || current.directEntry === request.entry ||
         this.records.get('launch\n' + tab.id)?.entry === request.entry);
     }
-    return allowsLearning(value, this.policy) && this.equivalent(request.url, value);
+    return allowsLearning(value, this.policy) && this.equivalent(request.url, value, this.requestKeys(request));
+  }
+  // A request's keys are computed once per learning revision, however many tabs it is compared with.
+  requestKeys(request) {
+    if (request.revision !== this.revision) Object.assign(request, { keys: this.keys(request.url), revision: this.revision });
+    return request.keys;
   }
   rememberLaunch(tabId, request) {
     if (request.entry && Number.isInteger(tabId)) this.put('launch\n' + tabId, { tabId, entry: request.entry });
@@ -72,6 +101,7 @@ export class LiveLearning {
         if (typeof record.entry === 'string' && record.entry.length <= this.policy.maxURLBytes) this.rememberLaunch(record.tabId, record);
       } else this.observe([record]);
     }
+    this.restoredUnchecked = this.records.size > 0;
   }
   observe(records) {
     for (const record of records) {
@@ -90,6 +120,7 @@ export class LiveLearning {
     while (this.records.size > this.policy.maxRecords || this.bytes > this.policy.maxCacheBytes) this.remove(this.records.keys().next().value);
   }
   prune(tabs) {
+    this.restoredUnchecked = false;
     const live = new Set();
     const byId = new Map(tabs.map(tab => [tab.id, tab]));
     for (const id of this.settledURLs.keys()) if (!byId.has(id)) this.settledURLs.delete(id);
@@ -119,11 +150,12 @@ export class LiveLearning {
 }
 
 export async function routeToTab(url, learning, browser, windowFocusOrder = new Map(), opening = {}) {
-  const [allWindows, source, tabs] = await Promise.all([
+  const [allWindows, source, listedTabs] = await Promise.all([
     browser.windows.getAll({ windowTypes: ['normal'] }),
     Number.isInteger(opening.sourceTabId) ? browser.tabs.get(opening.sourceTabId) : null,
     permittedTabs(browser, { windowType: 'normal' }),
   ]);
+  const tabs = await learning.withCreated(listedTabs, browser);
   const windows = allWindows.filter(value => !value.incognito);
   if (source?.incognito) throw new Error('Private tab links are not supported.');
   const visible = windows.filter(value => value.state !== 'minimized');
@@ -138,18 +170,29 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   const activateWindow = id => windows.find(value => value.id === id)?.focused ? Promise.resolve() : browser.windows.update(id, {
     ...(windows.find(value => value.id === id)?.state === 'minimized' ? { state: 'normal' } : {}), focused: true,
   });
-  learning.prune(tabs);
+  // Every match is checked against a live tab, so routine pruning stays off this path (the bridge prunes
+  // after each route). Restored learning is still checked against current tabs before its first match.
+  if (learning.restoredUnchecked) learning.prune(tabs);
   const request = learning.resolve(url);
   const preferred = tabs.find(tab => tab.active && tab.windowId === window?.id);
   const match = (preferred && learning.matches(request, preferred) && preferred) ||
     tabs.find(tab => urlKey(tab.pendingUrl || tab.url) === request.url && learning.matches(request, tab)) ||
     tabs.find(tab => learning.matches(request, tab));
   if (match) {
-    const current = await browser.tabs.get(match.id);
+    const current = learning.addressed(await browser.tabs.get(match.id));
     if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
     if (opening.deadline && opening.deadline <= Date.now()) throw new Error('The external request expired. Please open the link again.');
-    if (!current.active) await browser.tabs.update(match.id, { active: true });
-    await activateWindow(match.windowId);
+    // A background click keeps its page in front: the match moves to where a new background tab would open. Chromium
+    // regroups a moved tab by its new neighbours, so it moves only within its own group (or between ungrouped tabs);
+    // otherwise it is focused. Safari has no groupId.
+    if (opening.active === false && source && current.id !== source.id && (current.groupId ?? -1) === (source.groupId ?? -1)) {
+      const index = current.windowId === source.windowId && current.index < source.index ? source.index : source.index + 1;
+      if (current.pinned || (current.windowId === source.windowId && current.index === index)) return { result: 'moved' };
+      const moved = await browser.tabs.move(current.id, { windowId: source.windowId, index }).then(() => true, () => false);
+      if (moved) return { result: 'moved' };
+    }
+    // Both requests go out at once; the browser applies them in order, saving a round trip.
+    await Promise.all([current.active || browser.tabs.update(match.id, { active: true }), activateWindow(match.windowId)]);
     return { result: 'focused' };
   }
   const active = opening.active !== false;
@@ -159,6 +202,7 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
     ...(source?.windowId === window.id ? { index: source.index + 1 } : {}) }) :
     (await browser.windows.create({ url, incognito: false, type: 'normal', focused: true })).tabs?.[0];
   learning.rememberLaunch(created?.id, request);
+  learning.rememberCreated(created?.id, url);
   if (window && active) await activateWindow(window.id);
   return { result: 'opened' };
 }

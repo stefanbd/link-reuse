@@ -6,8 +6,8 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('./extension/page-links.js', import.meta.url), 'utf8');
 const settle = () => new Promise(setImmediate);
 
-function harness({ enabled = true, platform = 'win', reply = { result: 'focused' }, baseTarget, broken = false } = {}) {
-  const listeners = new Map(), sent = [], notices = [];
+function harness({ platform = 'win', reply = { result: 'focused' }, baseTarget, broken = false } = {}) {
+  const listeners = new Map(), sent = [], notices = [], skips = [];
   const node = () => ({ style: {}, setAttribute() {}, addEventListener() {}, append() {}, remove() {} });
   const document = {
     querySelector: () => baseTarget ? { getAttribute: () => baseTarget } : null,
@@ -15,12 +15,12 @@ function harness({ enabled = true, platform = 'win', reply = { result: 'focused'
     documentElement: { append: value => notices.push(value) },
   };
   const runtime = { sendMessage(message) {
+    if (message.type === 'page-skip') { skips.push(message.reason); return Promise.resolve(); }
     sent.push(message);
-    if (message.type === 'page-link-capability') return Promise.resolve({ enabled, platform });
     if (broken) throw new Error('Extension context invalidated.');
     return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
   } };
-  vm.runInNewContext(source, { chrome: { runtime }, document, URL,
+  vm.runInNewContext(source, { chrome: { runtime }, document, URL, navigator: { platform: platform === 'mac' ? 'MacIntel' : 'Win32' },
     window: { addEventListener(type, fn) { listeners.set(type, fn); } } });
   const click = (attributes = {}, change = {}) => {
     const anchor = { localName: 'a', href: 'https://example.test/item',
@@ -33,7 +33,7 @@ function harness({ enabled = true, platform = 'win', reply = { result: 'focused'
     listeners.get(event.type)(event);
     return event;
   };
-  return { click, sent, notices };
+  return { click, sent, notices, skips };
 }
 
 test('new-tab webpage gestures cancel the default before requesting one shared route', async () => {
@@ -47,8 +47,8 @@ test('new-tab webpage gestures cancel the default before requesting one shared r
     const clicked = h.click(attributes, event);
     assert.equal(clicked.cancelled, true);
     assert.equal(clicked.stopped, true);
-    assert.equal(h.sent.length, 2);
-    assert.deepEqual(JSON.parse(JSON.stringify(h.sent[1])), { type: 'page-link', url: 'https://example.test/item', active });
+    assert.equal(h.sent.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.sent[0])), { type: 'page-link', url: 'https://example.test/item', active });
     await settle();
     assert.equal(h.notices.length, 0);
   }
@@ -83,16 +83,16 @@ test('ordinary navigation, downloads, new-window gestures and synthetic clicks k
     const h = harness();
     await settle();
     assert.equal(h.click(attributes, event).cancelled, undefined);
-    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent.length, 0);
   }
 });
 
-test('unsupported platforms and startup before the capability reply do not cancel links', async () => {
-  const loading = harness();
-  assert.equal(loading.click({ target: '_blank' }).cancelled, undefined);
-  const unsupported = harness({ enabled: false });
-  await settle();
-  assert.equal(unsupported.click({ target: '_blank' }).cancelled, undefined);
+test('links are handled from page start, before the extension has answered anything', () => {
+  const h = harness({ platform: 'mac', reply: new Promise(() => {}) });
+  const clicked = h.click({}, { metaKey: true });
+  assert.equal(clicked.cancelled, true);
+  assert.deepEqual(h.sent.map(message => message.type), ['page-link']);
+  assert.equal(h.notices.length, 0);
 });
 
 test('an invalidated source script leaves the default action intact', async () => {
@@ -100,7 +100,7 @@ test('an invalidated source script leaves the default action intact', async () =
   await settle();
   assert.equal(h.click({ target: '_blank' }).cancelled, undefined);
   assert.equal(h.click({ target: '_blank' }).cancelled, undefined);
-  assert.equal(h.sent.length, 2);
+  assert.equal(h.sent.length, 1);
 });
 
 test('an uncertain response shows one local error without automatically opening a second tab', async () => {
@@ -114,4 +114,15 @@ test('an uncertain response shows one local error without automatically opening 
     assert.equal(h.notices.length, 1);
     assert.equal(h.sent.filter(message => message.type === 'page-link').length, 2);
   }
+});
+
+test('new-tab gestures left to the browser report a URL-free reason; ordinary clicks report nothing', async () => {
+  const h = harness({ platform: 'mac' });
+  await settle();
+  h.click({}, { metaKey: true, composedPath: () => [] });
+  h.click({ target: '_blank', download: '' }, { metaKey: true });
+  h.click({}, { metaKey: true, defaultPrevented: true });
+  h.click({}, {});
+  h.click({ target: '_self' }, {});
+  assert.deepEqual(h.skips, ['anchor', 'anchor', 'prevented']);
 });

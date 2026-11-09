@@ -13,6 +13,9 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent
 APP = pathlib.Path.home() / 'Applications/Link Reuse.app'
+# Spotlight skips `.noindex` folders. An indexed build copy gets registered automatically, and two registered
+# copies of the Safari extension make PlugInKit kill it, so Safari reloads every extension mid-request.
+BUILT_APP = ROOT / 'build/products.noindex/Link Reuse.app'
 REGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 RENAME_SWAP = 0x00000002
 
@@ -21,6 +24,11 @@ def run(*args): subprocess.run(list(map(str, args)), check=True)
 
 
 def register(app):
+    # For a few minutes after a bundle changes, every URL open through CoreServicesUIAgent (OpenIn, /usr/bin/open)
+    # re-registers it, and each re-registration makes PlugInKit kill the live Safari extension mid-request.
+    # Dating the folder back takes it out of that window; this explicit registration records the new contents.
+    past = time.time() - 3600
+    os.utime(app, (past, past))
     run(REGISTER, '-f', '-R', '-trusted', app)
 
 
@@ -58,7 +66,7 @@ def stop_owned_processes():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--app', type=pathlib.Path, default=ROOT / 'build/Link Reuse.app')
+    parser.add_argument('--app', type=pathlib.Path, default=BUILT_APP)
     args = parser.parse_args()
     run('codesign', '--verify', '--deep', '--strict', args.app)
     APP.parent.mkdir(exist_ok=True)

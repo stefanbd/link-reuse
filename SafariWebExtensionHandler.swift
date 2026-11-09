@@ -11,7 +11,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
         let response = NSExtensionItem()
         if message["type"] as? String == "diagnostic", let reason = message["result"] as? String,
-           ["core", "version", "queue", "message", "socket-error", "socket-close", "unavailable", "bootstrap"].contains(reason),
+           BridgeMessage.diagnosticReasons.contains(reason),
            let rawCode = message["error"] as? String, let code = Int(rawCode), (0...4999).contains(code) {
             Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari browser ended: \(reason, privacy: .public) \(code)")
             response.userInfo = [SFExtensionMessageKey: ["type": "receipt"]]

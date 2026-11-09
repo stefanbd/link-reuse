@@ -122,6 +122,21 @@ struct SafariBridgeTests {
             try await replacement.close(code: .protocolCode(.goingAway))
         }
         await bridge.stop()
+
+        // A (re)started extension is connected right away instead of on the next link, and only once.
+        let idleDeliveries = SafariDelivery()
+        let idle = try await SafariBridge(version: "3.2.4") { await idleDeliveries.send($0) }
+        try await idle.extensionReady()
+        let idleDescriptor = await idleDeliveries.next()
+        precondition(idleDescriptor.type == "connect" && idleDescriptor.endpoint != nil && idleDescriptor.id == nil)
+        let idleSocket = try await connect(idleDescriptor)
+        let idleReady = try await receive(idleSocket)
+        precondition(idleReady.type == "ready")
+        try await Task.sleep(for: .milliseconds(200))
+        try await idle.extensionReady()
+        let idleWakes = await idleDeliveries.count
+        precondition(idleWakes == 1)
+        await idle.stop()
         print("Safari loopback-only WebSocket, token authentication, one-time bootstrap, warm reuse and disconnect handling passed")
     }
 }

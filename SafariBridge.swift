@@ -7,6 +7,7 @@ import OSLog
 actor SafariBridge {
     static let extensionIdentifier = "me.dichev.LinkReuse.Safari"
     private static let authenticationData = Data("Link Reuse Safari connection".utf8)
+    private static let log = Logger(subsystem: "me.dichev.LinkReuse", category: "Safari")
 
     private struct Client {
         let connection: NetworkConnection<WebSocket>
@@ -74,25 +75,25 @@ actor SafariBridge {
         do { reply = try await exchange.request(url) }
         catch {
             let failure = error as NSError
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").error("Safari transport: failed \(failure.domain, privacy: .public) \(failure.code)")
+            Self.log.error("Safari transport: failed \(failure.domain, privacy: .public) \(failure.code)")
             throw error
         }
         if let error = reply.error {
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").error("Safari transport: extension operation failed")
+            Self.log.error("Safari transport: extension operation failed")
             throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
         }
         guard let result = reply.result, ["focused", "opened"].contains(result) else { throw POSIXError(.EINVAL) }
-        Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: completed \(result, privacy: .public)")
+        Self.log.notice("Safari transport: completed \(result, privacy: .public)")
         return result
     }
 
     private func deliver(_ message: BridgeMessage) async throws {
         if let (profile, client) = clients.filter({ $0.value.authenticated }).max(by: { $0.value.activity < $1.value.activity }), let id = message.id {
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: channel \(id, privacy: .public)")
+            Self.log.notice("Safari transport: channel \(id, privacy: .public)")
             if await exchange.claim(id, profile: profile) {
                 do {
                     try await send(message, to: client.connection)
-                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: sent")
+                    Self.log.notice("Safari transport: sent")
                 } catch { await disconnected(profile, connection: client.connection) }
             }
         } else {
@@ -100,9 +101,11 @@ actor SafariBridge {
         }
     }
 
+    /// Sends the connection address when a request is waiting or no extension context is connected yet.
     func extensionReady() async throws {
-        guard !(await exchange.unclaimed()).isEmpty else { return }
-        Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: bootstrap")
+        let connected = clients.values.contains(where: \.authenticated)
+        if connected, await exchange.unclaimed().isEmpty { return }
+        Self.log.notice("Safari transport: bootstrap")
         let token = Data(HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)).base64EncodedString()
         try await wake(BridgeMessage(type: "connect", endpoint: endpoint, token: token))
     }
@@ -131,7 +134,7 @@ actor SafariBridge {
             if hello.result == "active" { activity += 1 }
             clients[identity]?.authenticated = true
             clients[identity]?.activity = hello.result == "active" ? activity : 0
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari transport: authenticated")
+            Self.log.notice("Safari transport: authenticated")
             for request in await exchange.unclaimed() {
                 if let id = request.id, await exchange.claim(id, profile: identity) { try await send(request, to: connection) }
             }
@@ -141,6 +144,10 @@ actor SafariBridge {
                 case "activity":
                     activity += 1
                     clients[identity]?.activity = activity
+                case "trace":
+                    guard let event = message.result, BridgeMessage.traceEvents.contains(event) else { throw POSIXError(.EINVAL) }
+                    let tab = message.id.flatMap { Int($0) } ?? 0
+                    Self.log.notice("Safari page link: \(event, privacy: .public) tab \(tab)")
                 case "result":
                     guard let id = message.id, UUID(uuidString: id) != nil,
                           ["focused", "opened"].contains(message.result ?? "") || message.error != nil else { throw POSIXError(.EINVAL) }
@@ -153,15 +160,15 @@ actor SafariBridge {
                         error: accepted ? nil : "The external request is no longer available."), to: connection)
                 case "diagnostic":
                     guard let reason = message.result,
-                          ["core", "version", "queue", "message", "socket-error", "socket-close", "unavailable", "bootstrap"].contains(reason),
+                          BridgeMessage.diagnosticReasons.contains(reason),
                           let rawCode = message.error, let code = Int(rawCode), (0...4999).contains(code) else { throw POSIXError(.EINVAL) }
-                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari browser ended: \(reason, privacy: .public) \(code)")
+                    Self.log.notice("Safari browser ended: \(reason, privacy: .public) \(code)")
                 default: throw POSIXError(.EINVAL)
                 }
             }
         } catch {
             let failure = error as NSError
-            Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari channel ended: \(failure.domain, privacy: .public) \(failure.code)")
+            Self.log.notice("Safari channel ended: \(failure.domain, privacy: .public) \(failure.code)")
         }
         await disconnected(identity, connection: connection)
     }
@@ -188,9 +195,9 @@ actor SafariBridge {
                 }
                 switch opcode {
                 case .ping, .pong:
-                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").debug("Safari control frame bytes: \(payload.count)")
+                    Self.log.debug("Safari control frame bytes: \(payload.count)")
                 case .close:
-                    Logger(subsystem: "me.dichev.LinkReuse", category: "Safari").notice("Safari close frame: \(String(describing: frame.metadata.closeCode), privacy: .public)")
+                    Self.log.notice("Safari close frame: \(String(describing: frame.metadata.closeCode), privacy: .public)")
                     throw POSIXError(.EPIPE)
                 case .text: result = try JSONDecoder().decode(BridgeMessage.self, from: payload)
                 default: throw POSIXError(.EINVAL)

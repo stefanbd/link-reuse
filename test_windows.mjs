@@ -31,6 +31,7 @@ function browser(initial, windows = [{ id: 1, focused: true }], lastFocusedId = 
       async query() { return tabs.map(tab => ({ ...tab })); },
       async get(id) { return { ...tabs.find(tab => tab.id === id) }; },
       async update(id, change) { calls.push(['focus', id, change]); },
+      async move(id, change) { calls.push(['move', id, change]); },
       async create(change) { calls.push(['create', change]); const tab = { id: tabs.length + 1, windowId: change.windowId, status: 'loading', pendingUrl: change.url }; tabs.push(tab); return tab; },
     },
   } };
@@ -302,6 +303,16 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
     await new Promise(setImmediate);
     assert.deepEqual(saved.learning, []);
+    const maintenanceScheduled = () => [...pending.values()].filter(timer => timer.delay === 50).length;
+    chrome.tabs.onActivated.emit({ tabId: 1 });
+    chrome.tabs.onUpdated.emit(1, { discarded: true });
+    chrome.tabs.onUpdated.emit(1, { frozen: true });
+    chrome.tabs.onUpdated.emit(1, { status: 'loading' });
+    await new Promise(setImmediate);
+    assert.equal(maintenanceScheduled(), 0);
+    chrome.tabs.onUpdated.emit(1, { status: 'complete' });
+    await new Promise(setImmediate);
+    assert.equal(maintenanceScheduled(), 1);
   } finally {
     globalThis.WebSocket = previousSocket;
     if (previousChrome === undefined) delete globalThis.chrome;
@@ -830,14 +841,43 @@ test('two simultaneous external requests create one tab and then reuse it', asyn
   assert.deepEqual(sent.filter(value => value.type === 'result').map(value => value.result), ['opened', 'focused']);
 });
 
-test('a webpage new-tab click focuses an unloaded match without creating a tab or contacting its scripts', async () => {
-  const h = browser([{ url: 'https://example.test/source', active: true },
+test('a background webpage click moves an unloaded match next to its source without focusing it', async () => {
+  const h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/other' },
     { url: 'https://example.test/item', active: false, status: 'unloaded', discarded: true }]);
   const { bridge } = sessionBridge(h, learningSession());
   clearTimeout(bridge.timer);
+  assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: 1, active: false }), { result: 'moved' });
+  assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }]]);
+  assert.equal(h.tabs.length, 3);
+  clearTimeout(bridge.timer);
+});
+
+test('a background match already beside its source, left of it, in another window or pinned is placed without focus', async () => {
+  for (const [tabs, windows, calls] of [
+    [[{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/item' }], undefined, []],
+    [[{ url: 'https://example.test/item' }, { url: 'https://example.test/x' }, { url: 'https://example.test/source', active: true }], undefined,
+      [['move', 1, { windowId: 1, index: 2 }]]],
+    [[{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/item', windowId: 2, index: 0 }],
+      [{ id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' }], [['move', 2, { windowId: 1, index: 1 }]]],
+    [[{ url: 'https://example.test/item', pinned: true }, { url: 'https://example.test/source', active: true }], undefined, []],
+  ]) {
+    const h = browser(tabs, windows);
+    const source = h.tabs.find(tab => tab.url.endsWith('/source'));
+    const { bridge } = sessionBridge(h, learningSession());
+    clearTimeout(bridge.timer);
+    assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: source.id, active: false }), { result: 'moved' });
+    assert.deepEqual(h.calls, calls);
+    clearTimeout(bridge.timer);
+  }
+});
+
+test('a background match that cannot be moved is focused instead of doing nothing', async () => {
+  const h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/x' }, { url: 'https://example.test/item' }]);
+  h.api.tabs.move = async () => { throw new Error('Unsupported'); };
+  const { bridge } = sessionBridge(h, learningSession());
+  clearTimeout(bridge.timer);
   assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: 1, active: false }), { result: 'focused' });
-  assert.deepEqual(h.calls, [['focus', 2, { active: true }]]);
-  assert.equal(h.tabs.length, 2);
+  assert.deepEqual(h.calls, [['focus', 3, { active: true }]]);
   clearTimeout(bridge.timer);
 });
 
@@ -873,4 +913,72 @@ test('webpage clicks and external opens share one queue and cannot simultaneousl
   assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
   assert.equal(port.sent.find(message => message.id === 'external').result, 'focused');
   clearTimeout(bridge.timer);
+});
+
+test('a slow browser never has more than one tab-maintenance query in flight, plus one catch-up pass', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/item' }]);
+  const queries = [];
+  const { bridge } = sessionBridge(h, learningSession(), { queryTabs: () => new Promise(resolve => queries.push(resolve)) });
+  const fire = () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } };
+  fire();
+  for (let i = 0; i < 5; i++) { bridge.changed(); fire(); }
+  assert.equal(queries.length, 1);
+  queries[0](h.tabs.map(tab => ({ ...tab })));
+  await new Promise(setImmediate);
+  fire();
+  assert.equal(queries.length, 2);
+  queries[1](h.tabs.map(tab => ({ ...tab })));
+  await new Promise(setImmediate);
+  fire();
+  assert.equal(queries.length, 2);
+});
+
+test('with nothing learned and nothing unsaved, maintenance never lists tabs', async context => {
+  const pending = timers(context);
+  const h = browser([{ url: 'https://example.test/item' }]);
+  let queries = 0;
+  const { bridge } = sessionBridge(h, learningSession(), { queryTabs: async () => { queries++; return h.tabs.map(tab => ({ ...tab })); } });
+  const fire = async () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } await new Promise(setImmediate); await bridge.saving; };
+  await fire();
+  const afterFirstSave = queries;
+  for (let i = 0; i < 3; i++) { bridge.changed(); await fire(); }
+  assert.equal(queries, afterFirstSave);
+  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/item' }]);
+  await fire();
+  assert.equal(queries, afterFirstSave + 1);
+});
+
+test('rapid repeat clicks reuse a just-created tab that Safari still lists without an address', async () => {
+  const h = browser([{ url: 'https://example.test/source', active: true }]);
+  // Safari: a new tab has no pendingUrl and no URL until navigation commits, so URL-filtered queries leave it out.
+  const create = h.api.tabs.create;
+  h.api.tabs.create = async change => { const tab = await create(change); delete tab.pendingUrl; tab.index = change.index; return tab; };
+  h.api.tabs.query = async () => h.tabs.filter(tab => tab.url).map(tab => ({ ...tab }));
+  const learning = new LiveLearning(policy);
+  const open = active => routeToTab('https://example.test/new', learning, h.api, new Map(), { sourceTabId: 1, active }).then(value => value.result);
+  const results = [];
+  for (let click = 0; click < 5; click++) results.push(await open(false));
+  results.push(await open(true));
+  assert.deepEqual(results, ['opened', 'moved', 'moved', 'moved', 'moved', 'focused']);
+  assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
+  // The stand-in ends once the browser reports the address; a tab closed before that is forgotten.
+  h.tabs[1].url = 'https://example.test/new';
+  assert.equal(await open(false), 'moved');
+  assert.equal(learning.created.size, 0);
+  assert.equal(await routeToTab('https://example.test/other', learning, h.api, new Map(), { sourceTabId: 1, active: false }).then(value => value.result), 'opened');
+  h.tabs.pop();
+  h.api.tabs.get = async id => { const tab = h.tabs.find(value => value.id === id); if (!tab) throw new Error('No tab'); return { ...tab }; };
+  assert.equal(await routeToTab('https://example.test/other', learning, h.api, new Map(), { sourceTabId: 1, active: false }).then(value => value.result), 'opened');
+  assert.equal(h.calls.filter(call => call[0] === 'create').length, 3);
+});
+
+test('a background match moves only within its own tab group or between ungrouped tabs, otherwise it is focused', async () => {
+  for (const [sourceGroup, matchGroup, expected] of [[-1, -1, 'moved'], [7, 7, 'moved'], [-1, 7, 'focused'], [7, -1, 'focused'], [7, 8, 'focused'], [undefined, undefined, 'moved']]) {
+    const h = browser([{ url: 'https://example.test/source', active: true, groupId: sourceGroup }, { url: 'https://example.test/a' },
+      { url: 'https://example.test/new', groupId: matchGroup }]);
+    const result = await routeToTab('https://example.test/new', new LiveLearning(policy), h.api, new Map(), { sourceTabId: 1, active: false });
+    assert.equal(result.result, expected, `source group ${sourceGroup}, match group ${matchGroup}`);
+    assert.deepEqual(h.calls.map(call => call[0]), expected === 'moved' ? ['move'] : ['focus']);
+  }
 });

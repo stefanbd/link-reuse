@@ -18,18 +18,30 @@ export class BrowserBridge {
   observe(records) { this.learning.observe(records); this.changed(); }
   changed() {
     this.revision++;
-    if (this.timer) return;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      const revision = this.revision;
-      void this.queryTabs().then(async tabs => {
-        if (revision !== this.revision) return;
+    if (this.timer || this.maintaining) return;
+    this.timer = setTimeout(() => void this.maintain(), 50);
+  }
+  /** One pass at a time: a slow browser must not pile up tab queries. Changes during a pass get one catch-up pass. */
+  async maintain() {
+    this.timer = undefined;
+    this.maintaining = true;
+    void this.connect().catch(() => {});
+    const revision = this.revision;
+    try {
+      // Nothing learned and nothing unsaved: there is nothing to check against open tabs.
+      if (!this.learning.records.size && this.learning.revision === this.savedRevision) return;
+      const tabs = await this.queryTabs();
+      if (revision === this.revision) {
         this.learning.prune(tabs);
         await this.persist();
-      }).catch(() => {});
-      void this.connect().catch(() => {});
-    }, 50);
+      }
+    } catch {} finally {
+      this.maintaining = false;
+    }
+    if (revision !== this.revision && !this.timer) this.timer = setTimeout(() => void this.maintain(), 50);
   }
+  /** User activity: reconnect if the helper connection is down, without a maintenance pass. */
+  activity() { void this.connect().catch(() => {}); }
   connect(force = false) {
     if (this.port) return this.ready;
     if (!force && Date.now() < (this.retryAt || 0)) return Promise.reject(new Error(this.lastError));
@@ -135,6 +147,10 @@ export class BrowserBridge {
     if (this.connected) this.port.postMessage({ type: 'activity' });
   }
   forgetWindow(windowId) { this.windowFocusOrder.delete(windowId); }
+  /** URL-free page-link event, tagged with a tab ID, for the native log; only Safari's authenticated channel carries it. */
+  trace(event, tabId) {
+    if (this.port?.transportConnected) this.port.postMessage({ type: 'trace', result: event, id: String(Number.isInteger(tabId) ? tabId : 0) });
+  }
   async status() {
     try { await this.connect(true); } catch (error) { this.lastError = error.message; }
     const tabs = await this.queryTabs();

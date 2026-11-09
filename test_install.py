@@ -21,8 +21,7 @@ class InstallTests(unittest.TestCase):
             calls = []
             def run(*args):
                 calls.append(tuple(map(str, args)))
-                if str(args[0]) == install.REGISTER:
-                        if failing and failing(*args): raise subprocess.CalledProcessError(1, args)
+                if failing and failing(*args): raise subprocess.CalledProcessError(1, args)
                 if str(args[0]) == 'ditto': subprocess.run(list(map(str, args)), check=True)
             with patch.object(install, 'APP', destination), \
                  patch.object(install, 'stop_owned_processes') as stop, patch.object(install, 'run', side_effect=run), \

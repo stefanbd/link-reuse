@@ -62,14 +62,15 @@ chrome.webNavigation.onErrorOccurred.addListener(event => {
 });
 chrome.tabs.onRemoved.addListener(tabId => { observer.remove(tabId); void ready.then(({ bridge }) => bridge.changed()); });
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.url || change.status || 'discarded' in change || 'frozen' in change) void ready.then(({ bridge }) => bridge.changed());
+  // Only an address change or a finished load can make learned links stale; sleep/wake and load starts cannot.
+  if (change.url || change.status === 'complete') void ready.then(({ bridge }) => bridge.changed());
   if (change.url && !chrome.webNavigation.onHistoryStateUpdated) {
     void chrome.webNavigation.getFrame({ tabId, frameId: 0 }).then(frame => {
       if (frame?.documentId && frame.url === change.url) navigate({ ...frame, tabId, frameId: 0 }, 'history');
     }).catch(() => {});
   }
 });
-chrome.tabs.onActivated.addListener(() => { void ready.then(({ bridge }) => bridge.changed()); });
+chrome.tabs.onActivated.addListener(() => { void ready.then(({ bridge }) => bridge.activity()); });
 chrome.runtime.onStartup.addListener(() => { void ready.then(({ bridge }) => bridge.changed()); });
 chrome.windows.onFocusChanged.addListener(windowId => {
   if (windowId < 0) return;
@@ -80,14 +81,27 @@ chrome.windows.onFocusChanged.addListener(windowId => {
   }).catch(() => {});
 });
 chrome.windows.onRemoved.addListener(windowId => { void ready.then(({ bridge }) => bridge.forgetWindow?.(windowId)); });
+const skipReasons = new Set(['disabled', 'prevented', 'other', 'button', 'anchor', 'target']);
+// A tab the browser opened from a page; with the page-link events this shows any duplicate the handler missed.
+chrome.tabs.onCreated?.addListener(tab => { void ready.then(({ bridge }) => bridge.trace('tab-created', tab.openerTabId)); });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (['page-link-capability', 'page-link'].includes(message.type) && sender.tab && !sender.tab.incognito) {
-    void ready.then(({ bridge, platform }) => {
-      if (message.type === 'page-link-capability') return { enabled: true, platform };
+    void ready.then(async ({ bridge, platform }) => {
+      if (message.type === 'page-link-capability') {
+        if (sender.frameId === 0) bridge.trace('page-ready', sender.tab.id);
+        return { enabled: true, platform };
+      }
       if (!bridge.open) throw new Error('Webpage link reuse is unavailable in this browser.');
-      return bridge.open(message.url, { sourceTabId: sender.tab.id, active: message.active !== false });
+      try {
+        const reply = await bridge.open(message.url, { sourceTabId: sender.tab.id, active: message.active !== false });
+        bridge.trace('page-' + reply.result, sender.tab.id);
+        return reply;
+      } catch (error) { bridge.trace('page-failed', sender.tab.id); throw error; }
     }).then(respond, error => respond({ error: error.message }));
     return true;
+  }
+  if (message.type === 'page-skip' && sender.tab && skipReasons.has(message.reason)) {
+    void ready.then(({ bridge }) => bridge.trace('page-skip-' + message.reason, sender.tab.id));
   }
   if (message.type === 'canonical' && sender.tab && sender.frameId === 0) {
     void ready.then(({ bridge }) => {

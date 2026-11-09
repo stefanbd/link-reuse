@@ -1,10 +1,14 @@
 (() => {
-  let enabled = false;
-  let mac = false;
-  chrome.runtime.sendMessage({ type: 'page-link-capability' }).then(reply => {
-    enabled = reply?.enabled === true;
-    mac = reply?.platform === 'mac';
-  }).catch(() => {});
+  // Active from page start. Waiting for the extension to answer first let new-tab clicks through to the browser
+  // whenever the browser was slow; now a slow extension only delays the tab switch. A script disconnected by an
+  // extension update fails its first send synchronously and then leaves clicks to the browser.
+  let enabled = true;
+  const mac = /^Mac/.test(navigator.platform);
+
+  // URL-free note of why a new-tab gesture was left to the browser, for the native diagnostics log.
+  function skipped(reason) {
+    try { void chrome.runtime.sendMessage({ type: 'page-skip', reason }).catch(() => {}); } catch {}
+  }
 
   function failed() {
     if (document.getElementById('link-reuse-error')) return;
@@ -22,25 +26,28 @@
   }
 
   function open(event) {
-    if (!enabled || !event.isTrusted || event.defaultPrevented || event.altKey) return;
+    const gesture = event.isTrusted && (event.metaKey || event.ctrlKey || (event.type === 'auxclick' && event.button === 1));
+    const skip = reason => { if (gesture) skipped(reason); };
+    if (!enabled) return skip('disabled');
+    if (!event.isTrusted || event.defaultPrevented || event.altKey) return skip(event.defaultPrevented ? 'prevented' : 'other');
     const middle = event.type === 'auxclick' && event.button === 1;
     const modified = mac ? event.metaKey : event.ctrlKey;
-    if (!middle && (event.type !== 'click' || event.button !== 0)) return;
-    if (event.shiftKey && !middle && !modified) return;
+    if (!middle && (event.type !== 'click' || event.button !== 0)) return skip('button');
+    if (event.shiftKey && !middle && !modified) return skip('other');
     const anchor = event.composedPath().find(value => value.localName === 'a' && value.hasAttribute('href'));
-    if (!anchor || anchor.hasAttribute('download')) return;
+    if (!anchor || anchor.hasAttribute('download')) return skip('anchor');
     const target = (anchor.getAttribute('target') ?? document.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase();
-    if (!middle && !modified && target !== '_blank') return;
+    if (!middle && !modified && target !== '_blank') return skip('target');
     let url;
-    try { url = new URL(anchor.href); } catch { return; }
-    if (!['http:', 'https:'].includes(url.protocol)) return;
+    try { url = new URL(anchor.href); } catch { return skip('other'); }
+    if (!['http:', 'https:'].includes(url.protocol)) return skip('other');
     let response;
     try {
       response = chrome.runtime.sendMessage({ type: 'page-link', url: url.href, active: event.shiftKey || (!middle && !modified) });
-    } catch { enabled = false; return; }
+    } catch { enabled = false; return skip('disabled'); }
     event.preventDefault();
     event.stopImmediatePropagation();
-    void response.then(reply => { if (!['focused', 'opened'].includes(reply?.result)) failed(); }).catch(failed);
+    void response.then(reply => { if (!['focused', 'moved', 'opened'].includes(reply?.result)) failed(); }).catch(failed);
   }
   window.addEventListener('click', open, true);
   window.addEventListener('auxclick', open, true);
