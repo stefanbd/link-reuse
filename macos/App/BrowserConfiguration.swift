@@ -6,6 +6,30 @@ struct BrowserConfiguration: Codable, Equatable, Sendable {
     let bundleID: String
     let appPath: String
     let profilePath: String?
+
+    /// Whether any of this Chromium browser's profiles has the extension installed and enabled, read from the profiles'
+    /// preference files (the same record the browser's extensions page shows).
+    func hasExtension(_ id: String, applicationSupport: URL = .applicationSupportDirectory) -> Bool {
+        guard let profilePath else { return false }
+        let root = applicationSupport.appending(path: profilePath)
+        let profiles = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        return profiles.contains { profile in
+            ["Secure Preferences", "Preferences"].contains { name in
+                guard let data = try? Data(contentsOf: profile.appending(path: name)),
+                      let preferences = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let extensions = preferences["extensions"] as? [String: Any],
+                      let settings = extensions["settings"] as? [String: Any],
+                      let entry = settings[id] as? [String: Any] else { return false }
+                // Disabled: older Chromium sets state 0; newer lists disable_reasons (an array, or a non-zero mask).
+                if entry["state"] as? Int == 0 { return false }
+                switch entry["disable_reasons"] {
+                case let reasons as [Any]: return reasons.isEmpty
+                case let mask as Int: return mask == 0
+                default: return true
+                }
+            }
+        }
+    }
 }
 
 struct AppResources {
@@ -13,6 +37,9 @@ struct AppResources {
     let browsers: [BrowserConfiguration]
     let extensionOrigin: String
     let extensionVersion: String
+
+    /// The Chromium extension ID, from its origin `chrome-extension://<id>/`.
+    var extensionID: String { URL(string: extensionOrigin)?.host() ?? "" }
 
     static var directory: URL {
         URL(filePath: CommandLine.arguments[0]).deletingLastPathComponent()

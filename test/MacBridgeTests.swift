@@ -55,6 +55,41 @@ struct MacBridgeTests {
         precondition(!shouldExitRouter(busy: true, browserRunning: false))
         precondition(!shouldExitRouter(busy: false, browserRunning: true))
         precondition(shouldExitRouter(busy: false, browserRunning: false))
-        print("macOS IPC round trip, live-session selection, private permissions, bounded framing and lifecycle checks passed")
+        // A browser's extension counts only when a profile has it installed and enabled.
+        let support = FileManager.default.temporaryDirectory.appending(path: "link-reuse-profiles-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: support) }
+        let browser = BrowserConfiguration(id: "Test", name: "Test", bundleID: "test.browser", appPath: "/Applications/Test.app",
+                                           profilePath: "Test/User Data")
+        func profile(_ entry: [String: Any]?) throws {
+            let folder = support.appending(path: "Test/User Data/Default")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let settings: [String: Any] = entry.map { ["extension-id": $0] } ?? [:]
+            try JSONSerialization.data(withJSONObject: ["extensions": ["settings": settings]])
+                .write(to: folder.appending(path: "Preferences"))
+        }
+        check(!browser.hasExtension("extension-id", applicationSupport: support))
+        for (entry, enabled) in [(nil, false), ([:], true), (["disable_reasons": []], true), (["disable_reasons": [1]], false),
+                                 (["disable_reasons": 0], true), (["disable_reasons": 4], false), (["state": 0], false)] as [([String: Any]?, Bool)] {
+            try profile(entry)
+            check(browser.hasExtension("extension-id", applicationSupport: support) == enabled)
+        }
+        let safari = BrowserConfiguration(id: "Safari", name: "Safari", bundleID: "com.apple.Safari", appPath: "/Applications/Safari.app",
+                                          profilePath: nil)
+        check(!safari.hasExtension("extension-id", applicationSupport: support))
+
+        // Waiting for a starting browser: it ends when a session file appears, or when cancelled (the browser quit).
+        let starting = BridgeSession(id: UUID().uuidString, browser: "test.starting", pid: getpid(), started: started, activeAt: 3)
+        defer { try? FileManager.default.removeItem(at: starting.file) }
+        let waiting = Task.detached { try await MacBridge.connectedSessions(browser: starting.browser, host: host) }
+        try await Task.sleep(for: .milliseconds(50))
+        try starting.save()
+        let connected = try await waiting.value
+        precondition(connected.map(\.id) == [starting.id])
+        let abandoned = Task.detached { try await MacBridge.connectedSessions(browser: "test.never", host: host) }
+        abandoned.cancel()
+        do { _ = try await abandoned.value; preconditionFailure("A cancelled wait returned") } catch is CancellationError {}
+
+        print("macOS IPC round trip, live-session selection, private permissions, bounded framing, lifecycle, " +
+              "extension detection and connection-wait checks passed")
     }
 }

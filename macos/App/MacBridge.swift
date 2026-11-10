@@ -68,6 +68,32 @@ enum MacBridge {
         }.sorted { $0.activeAt > $1.activeAt }
     }
 
+    /// The browser's live sessions, waiting for its extension to connect if there are none yet. The wait follows changes
+    /// to the sessions folder (a session file appearing) and ends only when one connects or the task is cancelled.
+    static func connectedSessions(browser: String, host: URL = AppResources.recorderURL) async throws -> [BridgeSession] {
+        try prepare()
+        let folder = open(directory.path, O_EVTONLY)
+        guard folder >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let (changes, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: folder, eventMask: .write, queue: .global())
+        source.setEventHandler { continuation.yield() }
+        source.setCancelHandler { close(folder) }
+        source.resume()
+        defer {
+            source.cancel()
+            continuation.finish()
+        }
+        // Checked after the watch starts, so a session that connects in between is never missed.
+        var live = try sessions(browser: browser, host: host)
+        var iterator = changes.makeAsyncIterator()
+        while live.isEmpty {
+            guard await iterator.next() != nil else { throw CancellationError() }
+            try Task.checkCancellation()
+            live = try sessions(browser: browser, host: host)
+        }
+        return live
+    }
+
     static func descriptor(path: URL, listen: Bool) throws -> Int32 {
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }

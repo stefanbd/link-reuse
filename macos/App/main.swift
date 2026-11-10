@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pending: [OpenRequest] = []
     private var processing = false
     private var safari: SafariBridge?
+    /// A browser being started for a link, and the wait for its extension to connect.
+    private var starting: (bundleID: String, wait: Task<[BridgeSession], Error>)?
 
     init(resources: AppResources) { self.resources = resources }
 
@@ -22,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func applicationTerminated(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        if starting?.bundleID == app?.bundleIdentifier { starting?.wait.cancel() }
         if resources.browsers.contains(where: { $0.bundleID == app?.bundleIdentifier }) { terminateIfUnused() }
     }
 
@@ -59,20 +62,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             var sessions = try MacBridge.sessions(browser: browser.bundleID)
             if sessions.isEmpty {
+                // Not connected yet (usually a browser that is closed or still starting): hold the link until its
+                // extension connects, however long the browser takes, or until the browser quits.
+                guard browser.hasExtension(resources.extensionID) else { throw failure(notLoadedIn: browser) }
+                let wait = Task.detached { try await MacBridge.connectedSessions(browser: browser.bundleID) }
+                starting = (browser.bundleID, wait)
+                defer { starting = nil }
                 try await launch(browser)
-                for _ in 0..<40 where sessions.isEmpty {
-                    try await Task.sleep(for: .milliseconds(100))
-                    sessions = try MacBridge.sessions(browser: browser.bundleID)
-                }
+                do { sessions = try await wait.value }
+                catch is CancellationError { throw failure("\(browser.name) quit before Link Reuse could connect to it.") }
             }
-            guard let session = sessions.first else {
-                throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                    "Load the extension from Link Reuse.app/Contents/Resources/extension, " +
-                    "open its popup to connect, then try again."])
-            }
+            guard let session = sessions.first else { throw failure(notLoadedIn: browser) }
             // The extension focuses the matching window, which brings the browser forward.
             _ = try await Task.detached { try MacBridge.send(url, session: session) }.value
         }
+    }
+
+    private func failure(_ message: String) -> NSError {
+        NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func failure(notLoadedIn browser: BrowserConfiguration) -> NSError {
+        failure("Link Reuse isn’t loaded in \(browser.name). On its extensions page, turn on Developer mode, choose " +
+                "Load unpacked and select ~/Applications/Link Reuse.app/Contents/Resources/extension.")
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
