@@ -50,7 +50,6 @@ Build and install from source. You need the Xcode command-line tools, Python 3 a
 ```sh
 python3 macos/build.py --sign "Apple Development: Your Name (TEAMID)"   # or no --sign for an ad-hoc build
 python3 macos/install.py
-~/Applications/'Link Reuse.app'/Contents/MacOS/LinkReuse --install
 ```
 
 - **Chrome, Edge, Brave, Arc:** load the unpacked extension from

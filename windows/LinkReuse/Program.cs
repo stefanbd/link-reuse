@@ -42,7 +42,7 @@ internal static class Program
                 browser = values[browserIndex + 1];
                 values.RemoveRange(browserIndex, 2);
             }
-            switch (values.Count == 1 ? values[0] : "")
+            switch (values.Count == 0 ? "--setup" : values.Count == 1 ? values[0] : "")
             {
                 case "--install": Registration.Install(browser); return 0;
                 case "--uninstall": Registration.Uninstall(); return 0;
@@ -53,9 +53,8 @@ internal static class Program
                     Show($"Browser: {chosen}\nConnected extension profiles: {NativeHost.LiveSessions(chosen).Count()}\n\nSetup: link-reuse --setup\nDefault links: link-reuse --defaults");
                     return 0;
             }
-            if (values.Count == 0) { Browsers.Launch(Registration.Browser(browser), new Uri(Path.Combine(Registration.Home, "SETUP.html")).AbsoluteUri); return 0; }
             if (values.Count != 1 || !ValidURL(values[0])) throw new InvalidOperationException("Pass one http/https URL, optionally with --browser edge, chrome or brave. Setup: --setup; registration: --install; defaults: --defaults.");
-            foreach (var url in values) await NativeHost.Open(Registration.Browser(browser), url);
+            await NativeHost.Open(Registration.Browser(browser), values[0]);
             return 0;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Text.Json.JsonException or OperationCanceledException or System.ComponentModel.Win32Exception)

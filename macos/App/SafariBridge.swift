@@ -182,7 +182,7 @@ actor SafariBridge {
                         throw POSIXError(.EINVAL)
                     }
                     message.profile = identity
-                    _ = await exchange.receive(message)
+                    await exchange.receive(message)
                 case "authorize-create":
                     guard let id = message.id, UUID(uuidString: id) != nil else { throw POSIXError(.EINVAL) }
                     let accepted = await exchange.authorizeCreation(id, profile: identity)

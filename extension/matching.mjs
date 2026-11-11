@@ -1,6 +1,6 @@
 import { allowsLearning } from './learning.mjs';
 import { urlRules, normalizedKey } from './url-rules.mjs';
-
+import { isSafari } from './native-port.mjs';
 
 function urlKey(value) {
   try {
@@ -11,7 +11,7 @@ function urlKey(value) {
 
 /** Open tabs the extension may read. Safari lists only tabs on websites the user has granted. */
 export async function permittedTabs(browser, query = {}) {
-  if (!browser.runtime?.getURL?.('').startsWith('safari-web-extension:')) return browser.tabs.query(query);
+  if (!isSafari(browser)) return browser.tabs.query(query);
   const { origins } = await browser.permissions.getAll();
   if (!origins.length) {
     throw new Error('Allow Link Reuse website access in Safari Settings → Extensions to reuse tabs.');

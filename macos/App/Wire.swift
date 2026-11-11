@@ -25,5 +25,4 @@ enum Wire {
         var length = UInt32(data.count).littleEndian
         try output.write(contentsOf: withUnsafeBytes(of: &length) { Data($0) } + data)
     }
-
 }

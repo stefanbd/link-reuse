@@ -1,7 +1,6 @@
 import Foundation
 import Darwin
 
-
 struct BridgeSession: Codable, Sendable {
     let id: String
     let browser: String
@@ -44,7 +43,7 @@ enum MacBridge {
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
-    static func sessions(browser: String, host: URL = AppResources.recorderURL) throws -> [BridgeSession] {
+    static func sessions(browser: String, host: URL = AppResources.hostURL) throws -> [BridgeSession] {
         guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
         try prepare()
         let files = try FileManager.default.contentsOfDirectory(
@@ -77,7 +76,7 @@ enum MacBridge {
 
     /// The browser's live sessions, waiting for its extension to connect if there are none yet. The wait follows changes
     /// to the sessions folder (a session file appearing) and ends only when one connects or the task is cancelled.
-    static func connectedSessions(browser: String, host: URL = AppResources.recorderURL) async throws -> [BridgeSession] {
+    static func connectedSessions(browser: String, host: URL = AppResources.hostURL) async throws -> [BridgeSession] {
         try prepare()
         let folder = open(directory.path, O_EVTONLY)
         guard folder >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -120,8 +119,9 @@ enum MacBridge {
             guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             if listen {
                 guard chmod(path.path, 0o600) == 0, Darwin.listen(descriptor, 16) == 0 else { throw POSIXError(.EIO) }
+            } else {
+                configure(descriptor)
             }
-            if !listen { configure(descriptor) }
             return descriptor
         } catch { close(descriptor); throw error }
     }

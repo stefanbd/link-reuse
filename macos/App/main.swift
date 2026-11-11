@@ -47,11 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The router stays while a supported browser runs or a link is in progress.
     private func terminateIfUnused() {
-        let browserRunning = resources.browsers.contains { running($0) != nil }
-        if shouldExitRouter(busy: processing, browserRunning: browserRunning) { NSApp.terminate(nil) }
+        if !processing && !resources.browsers.contains(where: { running($0) != nil }) { NSApp.terminate(nil) }
     }
 
-    private func launch(_ browser: BrowserConfiguration) async throws {
+    /// Brings the browser forward, starting it if it isn't running.
+    private func show(_ browser: BrowserConfiguration) async throws {
         guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.bundleID) else {
             throw CocoaError(.fileNoSuchFile)
         }
@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if browser.profilePath == nil {
             // Safari's extension stalls while Safari is in the background, so bring it forward (launching it if
             // needed) before the request. When it is already in front, skip the activation round trip.
-            if running(browser)?.isActive != true { try await launch(browser) }
+            if running(browser)?.isActive != true { try await show(browser) }
             if safari == nil { safari = try await SafariBridge(version: resources.extensionVersion) }
             // Not connected yet: a disabled extension would never take the link, so say so rather than wait.
             if await safari?.connected != true {
@@ -83,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let wait = Task.detached { try await MacBridge.connectedSessions(browser: browser.bundleID) }
                 starting = (browser.bundleID, wait)
                 defer { starting = nil }
-                try await launch(browser)
+                try await show(browser)
                 do { sessions = try await wait.value }
                 catch is CancellationError { throw failure("\(browser.name) quit before Link Reuse could connect to it.") }
             }

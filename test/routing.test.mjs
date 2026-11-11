@@ -25,6 +25,7 @@ function browser(initial, windows = [{ id: 1, focused: true }], lastFocusedId = 
   const tabs = initial.map((tab, index) => ({ id: index + 1, index, windowId: 1, status: 'complete', incognito: false, ...tab }));
   const calls = [];
   return { tabs, calls, api: {
+    runtime: { getURL: value => 'chrome-extension://test/' + value },
     windows: {
       async getAll() { return windows; },
       async getLastFocused() { return windows.find(window => window.id === lastFocusedId); },

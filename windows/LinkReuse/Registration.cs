@@ -65,6 +65,7 @@ internal static class Registration
         Set(Client + @"\Capabilities\URLAssociations", "http", "LinkReuse.Url");
         Set(Client + @"\Capabilities\URLAssociations", "https", "LinkReuse.Url");
         Set(@"Software\RegisteredApplications", "LinkReuse", Client + @"\Capabilities");
+        var origin = Origin();
         foreach (var (id, value) in Browsers.Known)
         {
             var file = Path.Combine(Root, id + "-host.json");
@@ -77,7 +78,7 @@ internal static class Registration
                 writer.WriteString("path", hostExe);
                 writer.WriteString("type", "stdio");
                 writer.WriteStartArray("allowed_origins");
-                writer.WriteStringValue(Origin());
+                writer.WriteStringValue(origin);
                 writer.WriteEndArray();
                 writer.WriteEndObject();
             }

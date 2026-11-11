@@ -11,7 +11,6 @@ export const isSafari = api => api.runtime.getURL('').startsWith('safari-web-ext
 /** Returns a function that connects; Safari's first connection starts right away so it is ready for the first link. */
 export function prepareNative(api, Socket = globalThis.WebSocket, extensionVersion) {
   if (!isSafari(api)) return () => connectNative(api);
-  extensionVersion ??= api.runtime.getManifest().version;
   let prepared = connectNative(api, Socket, extensionVersion);
   return () => {
     if (prepared.closed) prepared = connectNative(api, Socket, extensionVersion);

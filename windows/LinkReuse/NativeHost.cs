@@ -129,7 +129,8 @@ internal sealed class NativeHost
 
     private static Session? Newest(string browser) => LiveSessions(browser).MaxBy(value => value.Created);
 
-    /// Starts the browser and waits for its extension to connect, however long the browser takes, or until it quits.
+    /// Brings the browser forward (starting it only when it has no window) and waits for its extension to connect, however
+    /// long the browser takes, or until it quits.
     private static async Task<Session> Connected(string browser)
     {
         if (!Browsers.HasExtension(browser, new Uri(Registration.Origin()).Host)) throw new InvalidOperationException("Link Reuse isn't loaded in this browser. Run link-reuse --setup, load the bundled extension, then try the link again.");

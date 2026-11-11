@@ -17,5 +17,3 @@ struct OpenRequest: Equatable, Sendable {
         url = target
     }
 }
-
-func shouldExitRouter(busy: Bool, browserRunning: Bool) -> Bool { !busy && !browserRunning }

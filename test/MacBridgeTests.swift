@@ -52,9 +52,6 @@ struct MacBridgeTests {
         try oversized.fileHandleForWriting.close()
         do { _ = try Wire.readFrame(from: oversized.fileHandleForReading); preconditionFailure("Oversized frame accepted") }
         catch let error as POSIXError { precondition(error.code == .EMSGSIZE) }
-        precondition(!shouldExitRouter(busy: true, browserRunning: false))
-        precondition(!shouldExitRouter(busy: false, browserRunning: true))
-        precondition(shouldExitRouter(busy: false, browserRunning: false))
         // A browser's extension counts only when a profile has it installed and enabled.
         let support = FileManager.default.temporaryDirectory.appending(path: "link-reuse-profiles-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: support) }
@@ -104,7 +101,7 @@ struct MacBridgeTests {
         precondition(stale.terminationReason == .uncaughtSignal && stale.terminationStatus == SIGTERM)
         check(!FileManager.default.fileExists(atPath: replaced.file.path))
 
-        print("macOS IPC round trip, live-session selection, private permissions, bounded framing, lifecycle, " +
+        print("macOS IPC round trip, live-session selection, private permissions, bounded framing, " +
               "extension detection, connection-wait and replaced-host checks passed")
     }
 }

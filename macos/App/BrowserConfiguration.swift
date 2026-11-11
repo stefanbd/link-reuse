@@ -33,7 +33,6 @@ struct BrowserConfiguration: Codable, Equatable, Sendable {
 }
 
 struct AppResources {
-    let directory: URL
     let browsers: [BrowserConfiguration]
     let extensionOrigin: String
     let extensionVersion: String
@@ -46,7 +45,8 @@ struct AppResources {
             .deletingLastPathComponent().appending(path: "Resources")
     }
 
-    static var recorderURL: URL {
+    /// The Chromium native messaging host: a copy of the app's binary.
+    static var hostURL: URL {
         directory.deletingLastPathComponent().appending(path: "Helpers/LinkReuseHost")
     }
 
@@ -57,7 +57,6 @@ struct AppResources {
         }
         let configuration = try JSONDecoder().decode(Configuration.self,
             from: Data(contentsOf: directory.appending(path: "configuration.json")))
-        self.directory = directory
         browsers = configuration.browsers
         extensionOrigin = configuration.extensionOrigin
         struct Manifest: Decodable { let version: String }
@@ -74,7 +73,7 @@ struct AppResources {
             let file = folder.appending(path: "me.dichev.link_reuse.json")
             let manifest: [String: Any] = [
                 "name": "me.dichev.link_reuse", "description": "Route links through the shared Link Reuse extension.",
-                "path": Self.recorderURL.path, "type": "stdio", "allowed_origins": [extensionOrigin],
+                "path": Self.hostURL.path, "type": "stdio", "allowed_origins": [extensionOrigin],
             ]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
                 .write(to: file, options: .atomic)
