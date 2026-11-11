@@ -2,7 +2,7 @@ import { RedirectObserver } from './observer.mjs';
 import { canonicalDestination } from './canonical.mjs';
 import { allowsLearning } from './learning.mjs';
 import { BrowserBridge } from './browser-bridge.mjs';
-import { prepareNative } from './native-port.mjs';
+import { isSafari, prepareNative } from './native-port.mjs';
 import { permittedTabs } from './matching.mjs';
 
 const observer = new RedirectObserver();
@@ -42,6 +42,25 @@ async function start() {
     },
   });
   return { policy, bridge };
+}
+
+/**
+ * Chromium adds content scripts only to pages that load after an install or update, so a page left open across an update
+ * would hand its links straight to the browser. Add them to the open tabs; the scripts an update orphaned there can no
+ * longer reach the extension and leave each click to the new ones. Safari re-injects the scripts itself.
+ */
+async function injectOpenTabs() {
+  for (const { matches, js, all_frames: allFrames = false } of chrome.runtime.getManifest().content_scripts) {
+    for (const tab of await chrome.tabs.query({ url: matches, discarded: false })) {
+      void chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames }, files: js, injectImmediately: true })
+        .catch(() => {});
+    }
+  }
+}
+if (!isSafari(chrome)) {
+  chrome.runtime.onInstalled.addListener(({ reason }) => {
+    if (reason === 'install' || reason === 'update') void injectOpenTabs();
+  });
 }
 
 const changed = () => void ready.then(({ bridge }) => bridge.changed());

@@ -45,8 +45,7 @@ Organization policies can block unpacked extensions or native messaging.
 scoop update link-reuse
 ```
 
-The update restarts the native helper, and the extension reloads itself. Reload pages that were already open to give
-them the new version.
+The update restarts the native helper. The extension reloads itself and updates the pages that are already open.
 
 ## Remove
 

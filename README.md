@@ -72,7 +72,7 @@ Make Link Reuse handle links, or keep your link router and add a destination for
 - **macOS:** pull, then run `python3 macos/build.py` and `python3 macos/install.py` again.
 - **Windows:** `scoop update link-reuse`.
 
-The extension reloads itself. Pages that were already open pick up the new version when you reload them.
+The extension reloads itself and updates the pages that are already open, so nothing needs reloading.
 
 ## Limits
 

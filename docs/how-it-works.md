@@ -86,8 +86,9 @@ scripts can act:
 - Right-click menus, downloads, Shift- and Alt-clicks, synthetic clicks and plain clicks inside frames keep the
   browser's behaviour.
 
-Chromium doesn't add a new content script to pages that were open before an extension update, so those pages need a
-reload. Safari re-injects it.
+Chromium adds content scripts only to pages that load after an install or update, so the background adds them to the
+tabs already open (`runtime.onInstalled`). The scripts the update orphaned there can no longer reach the extension and
+leave each click to the new ones. Safari re-injects the scripts itself.
 
 Another extension that stops click events first can hide them from Link Reuse while the browser still opens its own
 tab. StopTheMadness Pro does this when *Protect ⌘-click* or *Protect all links* is on. *Stop link trackers* does it for

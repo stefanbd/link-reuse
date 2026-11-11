@@ -10,6 +10,7 @@ const keysOf = (index, tab) => { const site = siteOf(index, tab); return site &&
 import { safariTransport } from './safari-support.mjs';
 
 const policy = JSON.parse(readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
+const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url)));
 const place = 'https://www.google.com/maps/place/Restaurant/@42,23,17z/data=!4m6!3m5!1s0x40aa8541e3d5da63:0x5353ef1753a6f43c!8m2!3d42';
 const photo = 'https://www.google.com/maps/place/Restaurant/@42,23,3a/data=!3m8!1sPHOTO!4m7!3m6!1s0x40aa8541e3d5da63:0x5353ef1753a6f43c!8m2!3d42';
 
@@ -248,13 +249,16 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
   let release;
   let saved;
   let accessLevel;
+  const queries = [];
+  const injected = [];
   const previousChrome = globalThis.chrome;
   const previousSocket = globalThis.WebSocket;
   const safari = mode === 'safari' ? safariTransport() : null;
   if (safari) globalThis.WebSocket = safari.Socket;
   globalThis.chrome = {
     runtime: { async getPlatformInfo() { return { os: platform }; }, getURL: value => (mode === 'safari' ? 'safari-web-extension://test/' : 'https://extension.test/') + value,
-      getManifest: () => ({ version: '3.2.4' }), connectNative: () => safari ? safari.api.runtime.connectNative() : port, onStartup: event(), onMessage: event(),
+      getManifest: () => ({ version: '3.2.4', content_scripts: manifest.content_scripts }),
+      connectNative: () => safari ? safari.api.runtime.connectNative() : port, onStartup: event(), onMessage: event(), onInstalled: event(),
       async sendNativeMessage(_application, message) {
         if (message.type === 'hello') return { type: 'ready' };
         if (message.type === 'claim') return { type: 'receipt', result: 'accepted' };
@@ -265,7 +269,9 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
       session: { async get() { return {}; }, async set() { throw new Error('Session storage must not own learned links.'); } } },
     permissions: { getAll: async () => ({ origins: ['<all_urls>'] }) },
     tabs: { ...h.api.tabs, onUpdated: event(), onRemoved: event(), onActivated: event(),
+      async query(filter) { queries.push(filter); return [{ id: 7 }]; },
       sendMessage() { throw new Error('Sleeping tab content must not be contacted to match it.'); } },
+    scripting: { async executeScript(details) { injected.push(details); } },
     windows: { ...h.api.windows, onFocusChanged: event(), onRemoved: event() },
     webNavigation: Object.fromEntries(['onBeforeNavigate', 'onCommitted', 'onHistoryStateUpdated',
       'onReferenceFragmentUpdated', 'onErrorOccurred'].map(name => [name, event()])),
@@ -277,6 +283,15 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     await import('../extension/background.mjs?session-restore=' + mode);
     await new Promise(setImmediate);
     assert.equal(accessLevel, 'TRUSTED_CONTEXTS');
+    // Chromium leaves tabs open across an install or update without content scripts; Safari re-injects them itself.
+    chrome.runtime.onInstalled.emit({ reason: 'chrome_update' });
+    chrome.runtime.onInstalled.emit({ reason: 'update' });
+    await new Promise(setImmediate);
+    const chromium = mode !== 'safari';
+    assert.deepEqual(queries, chromium ? manifest.content_scripts.map(({ matches }) => ({ url: matches, discarded: false })) : []);
+    assert.deepEqual(injected, chromium ? manifest.content_scripts.map(script =>
+      ({ target: { tabId: 7, allFrames: script.all_frames === true }, files: script.js, injectImmediately: true })) : []);
+    chrome.tabs.query = h.api.tabs.query;
     chrome.tabs.onUpdated.emit(1, { discarded: true, status: 'unloaded' });
     chrome.runtime.onStartup.emit();
     chrome.webNavigation.onCommitted.emit({ frameId: 0, tabId: 1, url: h.tabs[0].url, documentId: 'early' });

@@ -7,7 +7,7 @@ const safariApp = 'me.dichev.LinkReuse';
 const connectionEnded = 'The Safari connection ended before the tab operation.';
 const expired = 'The external request expired. Please open the link again.';
 
-const isSafari = api => api.runtime.getURL('').startsWith('safari-web-extension:');
+export const isSafari = api => api.runtime.getURL('').startsWith('safari-web-extension:');
 
 /** Returns a function that connects; Safari's first connection starts right away so it is ready for the first link. */
 export function prepareNative(api, Socket = globalThis.WebSocket, extensionVersion) {
