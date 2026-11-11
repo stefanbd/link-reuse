@@ -68,7 +68,7 @@ test('Safari creation waits for authorization on the existing socket without an 
   port.postMessage({ type: 'hello' });
   await new Promise(setImmediate);
   let authorized = false;
-  const pending = port.authorizeCreation('request', Date.now() + 10_000).then(() => { authorized = true; });
+  const pending = port.authorizeCreation('request').then(() => { authorized = true; });
   await new Promise(setImmediate);
   assert.equal(authorized, false);
   assert.deepEqual(h.sent.at(-1), { type: 'authorize-create', id: 'request' });
@@ -85,27 +85,29 @@ test('Safari rejects pending creation on disconnect and ignores a late authoriza
   const h = safariTransport({ authorize: false }), port = connectNative(h.api, h.Socket);
   port.postMessage({ type: 'hello' });
   await new Promise(setImmediate);
-  const pending = assert.rejects(port.authorizeCreation('request', Date.now() + 10_000), /connection ended/);
+  const pending = assert.rejects(port.authorizeCreation('request'), /connection ended/);
   h.sockets[0].close();
   await pending;
   h.emit({ type: 'create-authorized', id: 'request' });
-  await assert.rejects(port.authorizeCreation('request', Date.now() + 10_000), /connection ended/);
+  await assert.rejects(port.authorizeCreation('request'), /connection ended/);
 });
 
-test('Safari authorization uses the original request deadline and discards a late grant', async context => {
-  let now = 1000, expire;
-  context.mock.method(Date, 'now', () => now);
-  context.mock.method(globalThis, 'setTimeout', (fn, delay) => { assert.equal(delay, 20); expire = fn; return 1; });
-  context.mock.method(globalThis, 'clearTimeout', () => {});
+test('Safari creation waits for the grant however long it takes, and only the app can refuse it', async context => {
+  const scheduled = [];
+  context.mock.method(globalThis, 'setTimeout', fn => { scheduled.push(fn); return 1; });
   const h = safariTransport({ authorize: false }), port = connectNative(h.api, h.Socket);
   port.postMessage({ type: 'hello' });
   await new Promise(setImmediate);
-  const pending = assert.rejects(port.authorizeCreation('request', 1020), /expired/);
-  now = 1021;
-  expire();
-  await pending;
-  h.emit({ type: 'create-authorized', id: 'request' });
-  await assert.rejects(port.authorizeCreation('expired', 1020), /expired/);
+  let settled = false;
+  const granted = port.authorizeCreation('granted').finally(() => { settled = true; });
+  const refused = assert.rejects(port.authorizeCreation('refused'), /no longer available/);
+  await new Promise(setImmediate);
+  assert.equal(settled, false);
+  h.emit({ type: 'create-authorized', id: 'refused', error: 'The external request is no longer available.' });
+  await refused;
+  h.emit({ type: 'create-authorized', id: 'granted' });
+  await granted;
+  assert.deepEqual(scheduled, []);
   port.disconnect();
 });
 
@@ -233,14 +235,7 @@ test('Safari closes a failed channel once, discards late messages and replaces i
   replacement.disconnect();
 });
 
-test('Safari bounds early deliveries and cannot execute an expired external request', async () => {
-  const h = safariTransport(), port = connectNative(h.api, h.Socket), messages = [];
-  port.onMessage.addListener(message => messages.push(message));
-  port.postMessage({ type: 'hello' });
-  await new Promise(setImmediate);
-  h.emit({ type: 'open', id: 'expired', url: 'https://example.test/item', deadline: Date.now() - 1 });
-  assert.equal(messages.some(message => message.id === 'expired'), false);
-  port.disconnect();
+test('Safari bounds early deliveries', async () => {
   const bounded = safariTransport(), prepare = prepareNative(bounded.api, bounded.Socket);
   for (let i = 0; i < 17; i++) bounded.emit({ type: 'open', id: String(i), url: 'https://example.test/item' });
   await new Promise(setImmediate);

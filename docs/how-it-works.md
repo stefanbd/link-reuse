@@ -55,7 +55,8 @@ dropped once no open tab needs it, and restored records are checked against open
 authentication pages, addresses carrying tokens and private windows are never learned. Nothing is synced.
 
 Safari reports a cross-site navigation that moves to another web process as failed before it commits, so the observer
-keeps a navigation's start for 30 seconds.
+keeps a failed navigation's start until the tab's next start or commit. Chromium reports a start before every commit,
+so there the next start always replaces it.
 
 ## Opening a link
 
@@ -110,9 +111,9 @@ order across reloads.
 - Safari runs the extension with a resident Manifest V2 background page, because native messages cannot reliably wake
   a Manifest V3 one. Chromium uses Manifest V3. Both are built from the same source.
 - Each request belongs to one connection at a time. Creating a tab needs a one-time authorization, so a request that
-  was interrupted is never replayed once it may have created a tab. Expired requests are rejected before any tab
-  changes.
-- The Safari channel allows 16 clients, 5 seconds to authenticate and 1 MiB per message.
+  was interrupted is never replayed once it may have created a tab.
+- The Safari channel allows 16 clients and 1 MiB per message. When it is full, the oldest connection that hasn't
+  authenticated makes room, so idle connections can't keep the extension out.
 - The Mac app is background-only and starts on demand, with no login item or service. It brings Safari forward before
   handing over a link, because Safari's extension calls stall while Safari is in the background. It stays running while
   a supported browser is open.
@@ -123,8 +124,13 @@ order across reloads.
 There is never a second way to open the same request. An uncertain result shows an error instead of trying again, so
 a failure can't produce a duplicate.
 
+Nothing in Link Reuse waits on a timer. A link waits as long as the browser takes, and ends only with the extension's
+answer or with an event that settles it: its connection ends, or the browser quits. Before it waits for a browser
+that isn't connected, the app checks that the extension is installed and enabled there, so a missing extension is
+reported at once instead of waited on.
+
 A connection that ends reconnects at once. That is how an update's new helper takes over: both installers stop the
 old helpers only once the new one is in place, so whatever starts next is new. If that reconnect ends too, or the
 helper never connected, the next tab switch, window focus or popup tries again; a helper that keeps failing can't
 spin. The Mac app ends a helper left from a replaced version when it finds one, so its browser connects to the
-installed one. Reconnecting never waits on a timer or polls.
+installed one.

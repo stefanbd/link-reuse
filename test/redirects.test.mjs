@@ -56,18 +56,17 @@ test('closed tabs discard navigation state', () => {
   assert.deepEqual(observer.history(event(B)), []);
 });
 
-test('a redirect is learned though Safari reports a cross-site process swap as a failure before it commits', context => {
+test('a redirect is learned though Safari reports a cross-site process swap as a failure before it commits', () => {
   // Safari: onBeforeNavigate(A), onErrorOccurred as the navigation moves to another web process, then the commit of the
   // redirected B with no onBeforeNavigate of its own.
   const safari = new RedirectObserver();
   safari.before(event(A));
   safari.failed(1);
   assert.deepEqual(safari.committed(event(B, 'two', undefined)), [{ source: A, destination: B }]);
-  // A start older than thirty seconds no longer stands for the navigation that commits.
-  context.mock.timers.enable({ apis: ['Date'], now: 0 });
-  const stale = new RedirectObserver();
-  stale.before(event(A));
-  stale.failed(1);
-  context.mock.timers.tick(30001);
-  assert.deepEqual(stale.committed(event(B, 'two', undefined)), []);
+  // A failed start stands only until the next one: the navigation that commits then is that one's.
+  const replaced = new RedirectObserver();
+  replaced.before(event(A));
+  replaced.failed(1);
+  replaced.before(event(B));
+  assert.deepEqual(replaced.committed(event(B, 'two', undefined)), []);
 });

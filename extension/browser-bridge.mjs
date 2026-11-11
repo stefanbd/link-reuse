@@ -181,8 +181,8 @@ export class BrowserBridge {
       reply({ error: this.lastError || 'The extension is still connecting.' });
       return;
     }
-    const beforeCreate = port.authorizeCreation && (() => port.authorizeCreation(message.id, message.deadline));
-    void this.open(message.url, { deadline: message.deadline, beforeCreate }, port)
+    const beforeCreate = port.authorizeCreation && (() => port.authorizeCreation(message.id));
+    void this.open(message.url, { beforeCreate }, port)
       .then(reply, error => reply({ error: error.message }));
   }
 

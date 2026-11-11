@@ -148,7 +148,7 @@ internal static class Registration
             {
                 using var process = Process.GetProcessById(session.ProcessId);
                 process.Kill();
-                process.WaitForExit(5000);
+                process.WaitForExit();
                 File.Delete(Path.Combine(Sessions, session.Pipe + ".json"));
             }
             catch (Exception error) when (error is ArgumentException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception) { }

@@ -3,10 +3,11 @@
 import os
 import json
 import pathlib
+import select
+import signal
 import sqlite3
 import subprocess
 import sys
-import time
 
 root = (pathlib.Path.home() / 'Library/Group Containers/4QE86VV38D.app.loshadki.OpenIn'
         / 'Library/Application Support/OpenIn')
@@ -23,14 +24,23 @@ mapping.update({f'me.dichev.LinkReuse.{browser["id"]}': browser['id'] for browse
 if '--apply' not in sys.argv:
     raise SystemExit('Run with --apply after the installed app passes its browser checks.')
 
-stopped = subprocess.run(['pkill', '-TERM', '-x', '-u', str(os.getuid()), 'OpenIn'])
-if stopped.returncode not in (0, 1): stopped.check_returncode()
-for _ in range(50):
-    if subprocess.run(['pgrep', '-x', '-u', str(os.getuid()), 'OpenIn'], capture_output=True).returncode != 0:
-        break
-    time.sleep(0.1)
-else:
-    raise SystemExit('OpenIn is still running; its settings were not changed.')
+def openin():
+    found = subprocess.run(['pgrep', '-x', '-u', str(os.getuid()), 'OpenIn'], capture_output=True, text=True)
+    if found.returncode not in (0, 1): found.check_returncode()
+    return [int(pid) for pid in found.stdout.split()]
+
+
+# Stop OpenIn and wait for each process's exit event, so it can't write its settings while they change.
+exits, running = select.kqueue(), 0
+for pid in openin():
+    try: exits.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                      select.KQ_NOTE_EXIT)], 0)
+    except ProcessLookupError: continue
+    try: os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError: pass
+    running += 1
+while running: running -= len(exits.control(None, running))
+if openin(): raise SystemExit('OpenIn started again; its settings were not changed.')
 
 connection = sqlite3.connect(database)
 connection.row_factory = sqlite3.Row

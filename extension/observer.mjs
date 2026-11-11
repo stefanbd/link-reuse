@@ -10,13 +10,12 @@ export class RedirectObserver {
   }
 
   before(event) {
-    this.pending.set(event.tabId, { source: event.url, previous: this.tabs.get(event.tabId), at: Date.now() });
+    this.pending.set(event.tabId, { source: event.url, previous: this.tabs.get(event.tabId) });
   }
 
   committed(event) {
-    // A start survives a failure report (see failed) for 30 seconds; the next navigation replaces it anyway.
-    const reported = this.pending.get(event.tabId);
-    const pending = reported && Date.now() - reported.at < 30000 ? reported : undefined;
+    // A start survives a failure report (see failed) until this commit; a new start would have replaced it.
+    const pending = this.pending.get(event.tabId);
     const previous = pending?.previous;
     const sources = new Set([pending?.source ?? event.url]);
     if (event.transitionQualifiers?.includes('client_redirect') && previous && !previous.interacted) {
@@ -65,7 +64,8 @@ export class RedirectObserver {
   }
 
   // The current document stays. The pending start does too: Safari reports a cross-site process swap as a failure,
-  // then commits that navigation without a new onBeforeNavigate.
+  // then commits that navigation without a new onBeforeNavigate. Chromium reports a start before every commit, so
+  // there a failed start is always replaced first.
   failed(tabId) {
     this.tabs.delete(tabId);
   }

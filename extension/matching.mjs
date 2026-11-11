@@ -1,7 +1,6 @@
 import { allowsLearning } from './learning.mjs';
 import { urlRules, normalizedKey } from './url-rules.mjs';
 
-const expired = 'The external request expired. Please open the link again.';
 
 function urlKey(value) {
   try {
@@ -235,7 +234,6 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   if (match) {
     const current = learning.addressed(await browser.tabs.get(match.id));
     if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
-    if (opening.deadline && opening.deadline <= Date.now()) throw new Error(expired);
     // A background click keeps its page in front and moves the match beside it. Chromium regroups a moved tab by its
     // new neighbours, so the move stays within the tab's group; otherwise (or if it can't move) the match is selected.
     const sameGroup = (current.groupId ?? -1) === (source?.groupId ?? -1);
@@ -258,7 +256,6 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   if (opening.reuseOnly) return { result: 'none' };
   const active = opening.active !== false;
   await opening.beforeCreate?.();
-  if (opening.deadline && opening.deadline <= Date.now()) throw new Error(expired);
   const beside = window && source?.windowId === window.id ? { index: source.index + 1 } : {};
   const created = window
     ? await browser.tabs.create({ windowId: window.id, url, active, ...beside })

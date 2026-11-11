@@ -60,7 +60,7 @@ internal static class Program
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Text.Json.JsonException or OperationCanceledException or System.ComponentModel.Win32Exception)
         {
-            if (!native) Show(error is OperationCanceledException ? "The browser did not respond in time. Check whether the link opened before trying again." : error.Message, true);
+            if (!native) Show(error.Message, true);
             return 1;
         }
     }
@@ -86,6 +86,7 @@ internal static class Program
         {
             await CheckWindowsPipe(expected);
             CheckHostUpdate();
+            CheckExtensionDetection();
         }
         Console.WriteLine("Windows request validation and native framing checks passed.");
         return 0;
@@ -123,18 +124,37 @@ internal static class Program
     [SupportedOSPlatform("windows")]
     private static async Task CheckWindowsPipe(Message expected)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var name = "linkreuse-check-" + Guid.NewGuid().ToString("N");
         await using var server = new System.IO.Pipes.NamedPipeServerStream(name, System.IO.Pipes.PipeDirection.InOut, 1,
             System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous | System.IO.Pipes.PipeOptions.CurrentUserOnly);
-        var accepted = server.WaitForConnectionAsync(timeout.Token);
+        var accepted = server.WaitForConnectionAsync();
         await using var client = new System.IO.Pipes.NamedPipeClientStream(".", name, System.IO.Pipes.PipeDirection.InOut,
             System.IO.Pipes.PipeOptions.Asynchronous | System.IO.Pipes.PipeOptions.CurrentUserOnly);
-        await client.ConnectAsync(timeout.Token);
+        await client.ConnectAsync();
         await accepted;
-        var reading = Wire.Read(server, timeout.Token);
-        await Wire.Write(client, expected, timeout.Token);
+        var reading = Wire.Read(server);
+        await Wire.Write(client, expected);
         if (await reading != expected) throw new Exception("Current-user Windows pipe failed.");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void CheckExtensionDetection()
+    {
+        var userData = Path.Combine(Path.GetTempPath(), "linkreuse-profiles-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var profile = Path.Combine(userData, "Default");
+            Directory.CreateDirectory(profile);
+            if (Browsers.HasExtension("edge", "extension-id", userData)) throw new Exception("A profile without the extension counted.");
+            foreach (var (entry, enabled) in new[] { ("{}", true), ("{\"disable_reasons\":[]}", true), ("{\"disable_reasons\":[1]}", false),
+                         ("{\"disable_reasons\":0}", true), ("{\"disable_reasons\":4}", false), ("{\"state\":0}", false), ("[]", false) })
+            {
+                File.WriteAllText(Path.Combine(profile, "Preferences"), "{\"extensions\":{\"settings\":{\"extension-id\":" + entry + "}}}");
+                if (Browsers.HasExtension("edge", "extension-id", userData) != enabled) throw new Exception("Extension detection misread " + entry + ".");
+            }
+        }
+        finally { if (Directory.Exists(userData)) Directory.Delete(userData, true); }
+        Console.WriteLine("Windows extension detection reads enabled, disabled and missing entries.");
     }
 
     [SupportedOSPlatform("windows")]

@@ -18,5 +18,4 @@ struct BridgeMessage: Codable, Sendable {
     var profile: String? = nil
     var endpoint: String? = nil
     var token: String? = nil
-    var deadline: Double? = nil
 }

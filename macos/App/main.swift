@@ -25,6 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func applicationTerminated(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         if starting?.bundleID == app?.bundleIdentifier { starting?.wait.cancel() }
+        if let safari, let browser = resources.browsers.first(where: { $0.bundleID == app?.bundleIdentifier }),
+           browser.profilePath == nil {
+            let quit = failure("\(browser.name) quit before Link Reuse could open the link.")
+            Task { await safari.end(quit) }
+        }
         if resources.browsers.contains(where: { $0.bundleID == app?.bundleIdentifier }) { terminateIfUnused() }
     }
 
@@ -58,6 +63,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // needed) before the request. When it is already in front, skip the activation round trip.
             if running(browser)?.isActive != true { try await launch(browser) }
             if safari == nil { safari = try await SafariBridge(version: resources.extensionVersion) }
+            // Not connected yet: a disabled extension would never take the link, so say so rather than wait.
+            if await safari?.connected != true {
+                let state = try await SFSafariExtensionManager.stateOfSafariExtension(
+                    withIdentifier: SafariBridge.extensionIdentifier)
+                guard state.isEnabled else {
+                    throw failure("Link Reuse isn’t enabled in Safari. Turn it on in Safari Settings → Extensions.")
+                }
+            }
             _ = try await safari?.open(url)
         } else {
             var sessions = try MacBridge.sessions(browser: browser.bundleID)

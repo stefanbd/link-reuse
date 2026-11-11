@@ -63,7 +63,7 @@ struct SafariBridgeTests {
         precondition(ready.type == "ready" && ready.extensionVersion == "3.2.4" && ready.profile != nil)
         precondition(ready.profile != profile)
         let first = try await receive(socket)
-        precondition(first.type == "open" && first.url == "https://example.test/item" && first.deadline != nil)
+        precondition(first.type == "open" && first.url == "https://example.test/item")
         try await send(BridgeMessage(type: "result", id: first.id, result: "focused"), to: socket)
         let initialResult = try await opening.value
         precondition(initialResult == "focused")
@@ -71,7 +71,6 @@ struct SafariBridgeTests {
         try await socket.ping(Data([1]))
         let pong = try await socket.receive()
         precondition(pong.metadata.opcode == .pong)
-        try await Task.sleep(for: .seconds(12))
 
         for index in 0..<3 {
             let routing = Task { try await bridge.open("https://example.test/warm/\(index)") }
@@ -102,7 +101,7 @@ struct SafariBridgeTests {
         let recoveredSocket = try await connect(recoveryDescriptor)
         _ = try await receive(recoveredSocket)
         let replay = try await receive(recoveredSocket)
-        precondition(replay.id == interruptedMessage.id && replay.deadline == interruptedMessage.deadline)
+        precondition(replay.id == interruptedMessage.id)
         try await send(BridgeMessage(type: "result", id: replay.id, result: "focused"), to: recoveredSocket)
         let recoveredResult = try await interrupted.value
         precondition(recoveredResult == "focused")
@@ -137,6 +136,37 @@ struct SafariBridgeTests {
         let idleWakes = await idleDeliveries.count
         precondition(idleWakes == 1)
         await idle.stop()
-        print("Safari loopback-only WebSocket, token authentication, one-time bootstrap, warm reuse and disconnect handling passed")
+
+        // Connections that never authenticate can't keep the extension out: at capacity the oldest makes room.
+        let crowdedDeliveries = SafariDelivery()
+        let crowded = try await SafariBridge(version: "3.2.4") { await crowdedDeliveries.send($0) }
+        try await crowded.extensionReady()
+        let crowdedDescriptor = await crowdedDeliveries.next()
+        guard let crowdedURL = crowdedDescriptor.endpoint.flatMap({ URL(string: $0) }) else { preconditionFailure() }
+        var silent: [NetworkConnection<WebSocket>] = []
+        for _ in 0..<16 {
+            let socket = NetworkConnection(to: .url(crowdedURL)) {
+                WebSocket { TCP() }.additionalHeaders([("Origin", origin)])
+            }
+            try await socket.ping(Data([1]))
+            let accepted = try await socket.receive()
+            precondition(accepted.metadata.opcode == .pong)
+            silent.append(socket)
+        }
+        let admitted = try await connect(crowdedDescriptor)
+        let admittedReady = try await receive(admitted)
+        precondition(admittedReady.type == "ready")
+        do { _ = try await receive(silent[0]); preconditionFailure("The oldest silent connection kept its place") } catch {}
+
+        // Safari quitting ends the links still waiting for it.
+        let quitting = Task { try await crowded.open("https://example.test/quit") }
+        let undelivered = try await receive(admitted)
+        precondition(undelivered.type == "open")
+        await crowded.end(POSIXError(.ECANCELED))
+        do { _ = try await quitting.value; preconditionFailure("A link outlived Safari") }
+        catch let error as POSIXError { precondition(error.code == .ECANCELED) }
+        await crowded.stop()
+        print("Safari loopback-only WebSocket, token authentication, one-time bootstrap, warm reuse, disconnect handling, " +
+              "room for the extension and Safari quitting passed")
     }
 }

@@ -5,7 +5,6 @@
 const chromiumHost = 'me.dichev.link_reuse';
 const safariApp = 'me.dichev.LinkReuse';
 const connectionEnded = 'The Safari connection ended before the tab operation.';
-const expired = 'The external request expired. Please open the link again.';
 
 export const isSafari = api => api.runtime.getURL('').startsWith('safari-web-extension:');
 
@@ -45,7 +44,7 @@ export function connectNative(api, Socket = globalThis.WebSocket, extensionVersi
   /** Hands queued requests to the background once it is listening and the socket is authenticated. */
   function flush() {
     if (closed || !ready || !authenticated || !messages.size) return;
-    for (const message of queued.splice(0)) if (!message.deadline || message.deadline > Date.now()) emit(message);
+    for (const message of queued.splice(0)) emit(message);
   }
 
   /** Only a loopback WebSocket address and a 32-byte token are accepted. */
@@ -74,7 +73,6 @@ export function connectNative(api, Socket = globalThis.WebSocket, extensionVersi
       const waiting = authorizations.get(value.id);
       authorizations.delete(value.id);
       if (!waiting) return;
-      clearTimeout(waiting.timer);
       if (value.error) waiting.reject(new Error(value.error));
       else waiting.resolve();
     } else if (authenticated && value.type === 'open' && typeof value.id === 'string' &&
@@ -144,33 +142,27 @@ export function connectNative(api, Socket = globalThis.WebSocket, extensionVersi
       } else diagnostic = api.runtime.sendNativeMessage(safariApp, report);
       authenticated = false;
       queued.length = 0;
-      for (const waiting of authorizations.values()) {
-        clearTimeout(waiting.timer);
-        waiting.reject(new Error(connectionEnded));
-      }
+      for (const waiting of authorizations.values()) waiting.reject(new Error(connectionEnded));
       authorizations.clear();
       socket?.close();
       void diagnostic.catch(() => {}).finally(() => incoming.disconnect());
       for (const listener of disconnects) listener();
     },
 
-    /** Asks the app for one-time permission to create a tab, so an interrupted request is never replayed. */
-    authorizeCreation(id, deadline) {
+    /**
+     * Asks the app for one-time permission to create a tab, so an interrupted request is never replayed. The app answers
+     * at once; the connection ending rejects it.
+     */
+    authorizeCreation(id) {
       if (closed || !authenticated || socket?.readyState !== 1) return Promise.reject(new Error(connectionEnded));
-      if (!Number.isFinite(deadline) || deadline <= Date.now()) return Promise.reject(new Error(expired));
       if (authorizations.has(id) || authorizations.size >= 16) {
         return Promise.reject(new Error('The tab operation is already pending.'));
       }
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          authorizations.delete(id);
-          reject(new Error(expired));
-        }, deadline - Date.now());
-        authorizations.set(id, { resolve, reject, timer });
+        authorizations.set(id, { resolve, reject });
         try {
           socket.send(JSON.stringify({ type: 'authorize-create', id }));
         } catch (error) {
-          clearTimeout(timer);
           authorizations.delete(id);
           reject(error);
         }

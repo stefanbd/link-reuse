@@ -19,8 +19,8 @@ internal sealed class NativeHost
     internal async Task Run()
     {
         var input = Console.OpenStandardInput();
-        using var greetingTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        if ((await Wire.Read(input, greetingTimeout.Token))?.Type != "hello") throw new InvalidDataException("Missing extension greeting.");
+        // The extension greets as soon as it connects; the browser closing the input ends the wait otherwise.
+        if ((await Wire.Read(input))?.Type != "hello") throw new InvalidDataException("Missing extension greeting.");
         var (browser, browserProcessId) = Browsers.ParentBrowser();
         Directory.CreateDirectory(Registration.Sessions);
         using var process = Process.GetCurrentProcess();
@@ -71,24 +71,22 @@ internal sealed class NativeHost
         }
     }
 
+    /// One link: it ends with the extension's answer, or when the router or this helper goes away.
     private async Task Serve(NamedPipeServerStream pipe)
     {
         await using (pipe)
-        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token))
         {
-            timeout.CancelAfter(TimeSpan.FromSeconds(10));
-            var deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 10000;
             string? id = null;
             try
             {
-                var request = await Wire.Read(pipe, timeout.Token);
+                var request = await Wire.Read(pipe, lifetime.Token);
                 if (request?.Type != "open" || !Program.ValidURL(request.Url)) throw new InvalidDataException("Invalid web-link request.");
                 id = Guid.NewGuid().ToString("N");
                 var waiting = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
                 pending[id] = waiting;
-                await Send(new Message("open", id, request.Url, Deadline: deadline));
-                var response = await waiting.Task.WaitAsync(timeout.Token);
-                await Wire.Write(pipe, response, timeout.Token);
+                await Send(new Message("open", id, request.Url));
+                var response = await waiting.Task;
+                await Wire.Write(pipe, response, lifetime.Token);
             }
             catch (Exception error) when (error is IOException or OperationCanceledException or InvalidDataException)
             {
@@ -118,28 +116,57 @@ internal sealed class NativeHost
         }
     }
 
+    private static Session? Newest(string browser) => LiveSessions(browser).MaxBy(value => value.Created);
+
+    /// Starts the browser and waits for its extension to connect, however long the browser takes, or until it quits.
+    private static async Task<Session> Connected(string browser)
+    {
+        if (!Browsers.HasExtension(browser, new Uri(Registration.Origin()).Host)) throw new InvalidOperationException("Link Reuse isn't loaded in this browser. Run link-reuse --setup, load the bundled extension, then try the link again.");
+        Directory.CreateDirectory(Registration.Sessions);
+        var changed = new SemaphoreSlim(0);
+        using var sessions = new FileSystemWatcher(Registration.Sessions, "linkreuse-*.json") { NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite };
+        sessions.Created += (_, _) => changed.Release();
+        sessions.Changed += (_, _) => changed.Release();
+        sessions.Renamed += (_, _) => changed.Release();
+        sessions.Error += (_, _) => changed.Release();
+        sessions.EnableRaisingEvents = true;
+        Browsers.Launch(browser);
+        var quit = Browsers.Quit(browser);
+        // Checked after the watch starts, so a session that connects in between is never missed.
+        while (true)
+        {
+            if (Newest(browser) is { } session) return session;
+            if (await Task.WhenAny(changed.WaitAsync(), quit) == quit) throw new InvalidOperationException("The browser quit before Link Reuse could connect to it.");
+        }
+    }
+
     internal static async Task Open(string browser, string url)
     {
-        var sessions = LiveSessions(browser).OrderByDescending(value => value.Created).ToArray();
-        if (sessions.Length == 0)
+        var session = Newest(browser) ?? await Connected(browser);
+        const string ended = "The browser connection ended before the link was sent. Please open it again.";
+        Process host;
+        try { host = Process.GetProcessById(session.ProcessId); }
+        catch (ArgumentException) { throw new IOException(ended); }
+        using (host)
         {
-            Browsers.Launch(browser);
-            for (var attempt = 0; attempt < 40 && sessions.Length == 0; attempt++)
+            await using var pipe = new NamedPipeClientStream(".", session.Pipe, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using var stop = new CancellationTokenSource();
+            // A free connection, however long the helper stays busy, unless the helper ends first.
+            var connecting = pipe.ConnectAsync(stop.Token);
+            if (await Task.WhenAny(connecting, host.WaitForExitAsync()) != connecting)
             {
-                await Task.Delay(100);
-                sessions = LiveSessions(browser).OrderByDescending(value => value.Created).ToArray();
+                stop.Cancel();
+                throw new IOException(ended);
             }
+            await connecting;
+            AllowSetForegroundWindow((uint)session.BrowserProcessId);
+            await Wire.Write(pipe, new Message("open", Url: url));
+            // The answer, or the end of the connection when the helper or its browser goes away.
+            var response = await Wire.Read(pipe);
+            if (response is null) throw new IOException("The browser connection ended. Check whether the link opened before trying again.");
+            if (response.Error is not null) throw new InvalidOperationException(response.Error);
+            if (response.Type != "result" || response.Result is not ("focused" or "opened")) throw new InvalidDataException("Unexpected browser response.");
         }
-        if (sessions.Length == 0) throw new InvalidOperationException("The Link Reuse extension is not connected in this browser. Run link-reuse --setup, load the bundled extension, then try the link again.");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
-        await using var pipe = new NamedPipeClientStream(".", sessions[0].Pipe, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        await pipe.ConnectAsync(1000, timeout.Token);
-        AllowSetForegroundWindow((uint)sessions[0].BrowserProcessId);
-        await Wire.Write(pipe, new Message("open", Url: url), timeout.Token);
-        var response = await Wire.Read(pipe, timeout.Token);
-        if (response is null) throw new IOException("The browser connection ended. Check whether the link opened before trying again.");
-        if (response.Error is not null) throw new InvalidOperationException(response.Error);
-        if (response.Type != "result" || response.Result is not ("focused" or "opened")) throw new InvalidDataException("Unexpected browser response.");
     }
 
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AllowSetForegroundWindow(uint processId);

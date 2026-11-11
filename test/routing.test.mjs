@@ -290,7 +290,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     release({ learning: [{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }] });
     await new Promise(setImmediate);
     await new Promise(setImmediate);
-    const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short', deadline: Date.now() + 10_000 };
+    const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short' };
     if (safari) safari.emit(request); else port.emit(request);
     await new Promise(setImmediate);
     assert.deepEqual((safari?.sent ?? port.sent).find(message => message.type === 'result' && message.id === 'first-after-idle'),
@@ -386,15 +386,6 @@ test('a tab that navigates during concurrent window lookup still fails final rev
   assert.deepEqual(h.calls, []);
 });
 
-test('expired external requests cannot focus or create a tab', async () => {
-  for (const tabs of [[], [{ url: 'https://example.test/item', active: false }]]) {
-    const h = browser(tabs);
-    await assert.rejects(routeToTab('https://example.test/item', new LiveLearning(policy), h.api, new Map(),
-      { deadline: Date.now() - 1 }), /expired/);
-    assert.deepEqual(h.calls, []);
-  }
-});
-
 test('creation waits for transport authorization, while existing-tab reuse needs none', async () => {
   const h = browser([]);
   let release;
@@ -423,23 +414,8 @@ test('lost creation authorization cannot create a tab or window', async () => {
   }
 });
 
-test('a request that expires while waiting for creation authorization cannot mutate tabs', async context => {
-  let now = 1000, release;
-  context.mock.method(Date, 'now', () => now);
-  const h = browser([]);
-  const opening = assert.rejects(routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
-    deadline: 1020, beforeCreate: () => new Promise(resolve => { release = resolve; }),
-  }), /expired/);
-  await new Promise(setImmediate);
-  now = 1021;
-  release();
-  await opening;
-  assert.deepEqual(h.calls, []);
-});
-
-test('an external request that expires behind another open is rejected at the mutation boundary', async context => {
-  let now = 1000;
-  context.mock.method(Date, 'now', () => now);
+test('a link behind a slow one waits its turn, however long, then opens', async context => {
+  const pending = timers(context);
   const h = browser([]), original = h.api.windows.getAll;
   let release;
   h.api.windows.getAll = () => new Promise(resolve => { release = resolve; });
@@ -447,12 +423,14 @@ test('an external request that expires behind another open is rejected at the mu
   const first = bridge.open('https://example.test/first');
   await new Promise(setImmediate);
   h.api.windows.getAll = original;
-  const expired = assert.rejects(bridge.open('https://example.test/second', { deadline: 1001 }), /expired/);
-  now = 2000;
+  const second = bridge.open('https://example.test/second');
+  await new Promise(setImmediate);
+  assert.equal(h.tabs.length, 0);
   release(await original());
   assert.deepEqual(await first, { result: 'opened' });
-  await expired;
-  assert.equal(h.tabs.length, 1);
+  assert.deepEqual(await second, { result: 'opened' });
+  assert.equal(h.tabs.length, 2);
+  assert.equal(pending.size, 0);
 });
 
 test('place identity rules reject another place, conflicting identities and lookalike URLs', async () => {

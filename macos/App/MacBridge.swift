@@ -122,10 +122,8 @@ enum MacBridge {
         } catch { close(descriptor); throw error }
     }
 
+    /// A closed peer fails the call instead of signalling. Reads wait for the reply or the end of the connection.
     static func configure(_ descriptor: Int32) {
-        var timeout = timeval(tv_sec: 12, tv_usec: 0)
-        _ = setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        _ = setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var noSignal: Int32 = 1
         _ = setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
     }

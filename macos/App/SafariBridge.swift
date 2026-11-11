@@ -11,6 +11,7 @@ actor SafariBridge {
 
     private struct Client {
         let connection: NetworkConnection<WebSocket>
+        let number: UInt64
         var authenticated = false
         var activity: UInt64 = 0
     }
@@ -22,6 +23,7 @@ actor SafariBridge {
     private var endpoint = ""
     private var serving: Task<Void, Never>?
     private var clients: [String: Client] = [:]
+    private var connections: UInt64 = 0
     private var activity: UInt64 = 0
     private lazy var exchange = BridgeExchange { [weak self] message in
         guard let self else { throw POSIXError(.EPIPE) }
@@ -61,6 +63,12 @@ actor SafariBridge {
     }
 
     deinit { serving?.cancel() }
+
+    /// Whether an extension context is connected and authenticated.
+    var connected: Bool { clients.values.contains(where: \.authenticated) }
+
+    /// Safari quit: the links still waiting for it end with error.
+    func end(_ error: any Error) async { await exchange.finish(error) }
 
     func stop() async {
         serving?.cancel()
@@ -108,7 +116,6 @@ actor SafariBridge {
 
     /// Sends the connection address when a request is waiting or no extension context is connected yet.
     func extensionReady() async throws {
-        let connected = clients.values.contains(where: \.authenticated)
         if connected, await exchange.unclaimed().isEmpty { return }
         Self.log.notice("Safari transport: bootstrap")
         let code = HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)
@@ -117,21 +124,24 @@ actor SafariBridge {
     }
 
     private func accept(_ connection: NetworkConnection<WebSocket>) async {
-        guard clients.count < 16 else { return }
+        // At capacity the oldest connection that hasn't authenticated makes room, so idle ones can't keep Safari out.
+        var evicted: NetworkConnection<WebSocket>?
+        if clients.count >= 16 {
+            guard let (identity, idle) = clients.filter({ !$0.value.authenticated })
+                .min(by: { $0.value.number < $1.value.number }) else { return }
+            clients.removeValue(forKey: identity)
+            evicted = idle.connection
+        }
+        connections += 1
         let identity = UUID().uuidString
-        clients[identity] = Client(connection: connection)
+        clients[identity] = Client(connection: connection, number: connections)
+        if let evicted { try? await evicted.close() }
         await serve(connection, identity: identity)
     }
 
     private func serve(_ connection: NetworkConnection<WebSocket>, identity: String) async {
         do {
-            let hello = try await withThrowingTaskGroup(of: BridgeMessage.self) { group in
-                group.addTask { try await Self.read(connection) }
-                group.addTask { try await Task.sleep(for: .seconds(5)); throw POSIXError(.ETIMEDOUT) }
-                defer { group.cancelAll() }
-                guard let value = try await group.next() else { throw POSIXError(.EIO) }
-                return value
-            }
+            let hello = try await Self.read(connection)
             guard hello.type == "hello", clients[identity] != nil,
                   let token = hello.token, let code = Data(base64Encoded: token),
                   HMAC<SHA256>.isValidAuthenticationCode(code, authenticating: Self.authenticationData, using: key) else {

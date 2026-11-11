@@ -48,18 +48,21 @@ enum NativeHost {
             guard client >= 0 else { return }
             MacBridge.configure(client)
             let stream = FileHandle(fileDescriptor: client, closeOnDealloc: true)
-            do {
-                guard let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EIO) }
-                let request = try JSONDecoder().decode(BridgeMessage.self, from: data)
-                guard request.type == "open", let url = request.url, isWebLink(url) else { throw POSIXError(.EINVAL) }
-                Task {
-                    do {
-                        let reply = try await exchange.request(url)
-                        try Wire.writeFrame(JSONEncoder().encode(reply), to: stream)
-                    } catch {}
-                    try? stream.close()
-                }
-            } catch { try? stream.close() }
+            // Each client on its own thread, so one that never sends can't hold up the next.
+            Thread.detachNewThread {
+                do {
+                    guard let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EIO) }
+                    let request = try JSONDecoder().decode(BridgeMessage.self, from: data)
+                    guard request.type == "open", let url = request.url, isWebLink(url) else { throw POSIXError(.EINVAL) }
+                    Task {
+                        do {
+                            let reply = try await exchange.request(url)
+                            try Wire.writeFrame(JSONEncoder().encode(reply), to: stream)
+                        } catch {}
+                        try? stream.close()
+                    }
+                } catch { try? stream.close() }
+            }
         }
     }
 

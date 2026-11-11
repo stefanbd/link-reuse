@@ -1,6 +1,8 @@
 import Foundation
 import Darwin
 
+/// The requests waiting on the extension. Each ends with the extension's answer, or when what carries it ends: its
+/// connection, or the browser.
 actor BridgeExchange {
     private struct Pending {
         let continuation: CheckedContinuation<BridgeMessage, Error>
@@ -19,13 +21,8 @@ actor BridgeExchange {
     func request(_ url: String) async throws -> BridgeMessage {
         guard pending.count < 16 else { throw POSIXError(.EBUSY) }
         let id = UUID().uuidString
-        let timer = Task {
-            do { try await Task.sleep(for: .seconds(10)); fail(id, error: POSIXError(.ETIMEDOUT)) } catch {}
-        }
-        defer { timer.cancel() }
         return try await withCheckedThrowingContinuation { continuation in
-            let deadline = Date().timeIntervalSince1970 * 1000 + 10_000
-            let message = BridgeMessage(type: "open", id: id, url: url, deadline: deadline)
+            let message = BridgeMessage(type: "open", id: id, url: url)
             pending[id] = Pending(continuation: continuation, message: message)
             Task {
                 do { try await send(message) }
@@ -44,8 +41,7 @@ actor BridgeExchange {
     }
 
     func authorizeCreation(_ id: String, profile: String) -> Bool {
-        guard var request = pending[id], request.profile == profile, !request.creationAuthorized,
-              (request.message.deadline ?? 0) > Date().timeIntervalSince1970 * 1000 else { return false }
+        guard var request = pending[id], request.profile == profile, !request.creationAuthorized else { return false }
         request.creationAuthorized = true
         pending[id] = request
         return true
@@ -60,8 +56,8 @@ actor BridgeExchange {
     }
 
     func fail(_ id: String, error: any Error) { pending.removeValue(forKey: id)?.continuation.resume(throwing: error) }
-    func finish() {
-        for request in pending.values { request.continuation.resume(throwing: POSIXError(.EPIPE)) }
+    func finish(_ error: any Error = POSIXError(.EPIPE)) {
+        for request in pending.values { request.continuation.resume(throwing: error) }
         pending.removeAll()
     }
 
