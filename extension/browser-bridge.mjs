@@ -1,5 +1,5 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
-import { reuseIndex, siteOf, pageKeys } from './page-keys.mjs';
+import { reuseIndex, pageKeys } from './page-keys.mjs';
 
 const maxPending = 16;
 const maxReconnects = 4;
@@ -62,21 +62,19 @@ export class BrowserBridge {
   }
 
   /**
-   * Sends each page the match keys of the other tabs on its own site, so it can decide a plain link click at the click.
-   * Only pages whose keys changed are messaged; an unchanged site costs nothing.
+   * Sends each page the fingerprints of the other tabs' match keys, so it can decide a plain link click at the click.
+   * Only pages whose keys changed are messaged.
    */
   publish(tabs) {
     this.pageIndex = reuseIndex(tabs, this.learning);
     const live = new Set(tabs.map(tab => tab.id));
     for (const id of this.sentKeys.keys()) if (!live.has(id)) this.sentKeys.delete(id);
     for (const tab of tabs) {
-      const site = !tab.discarded && siteOf(this.pageIndex, tab);
-      const sent = this.sentKeys.get(tab.id);
-      if (!site || sent?.signature === site.signature) continue;
-      const keys = pageKeys(site, tab);
-      const list = JSON.stringify(keys);
-      this.sentKeys.set(tab.id, { signature: site.signature, list });
-      if (sent?.list === list) continue;
+      const keys = !tab.discarded && pageKeys(this.pageIndex, tab);
+      if (!keys) continue;
+      const list = keys.join();
+      if (this.sentKeys.get(tab.id) === list) continue;
+      this.sentKeys.set(tab.id, list);
       // A page without the script gets its keys when it next loads; a failed send is retried on the next pass.
       void Promise.resolve()
         .then(() => this.browserAPI.tabs.sendMessage(tab.id, { type: 'page-keys', keys }, { frameId: 0 }))
@@ -87,10 +85,9 @@ export class BrowserBridge {
   /** A loading page's keys: from the last pass, or from current tabs in a freshly started background. */
   async keysFor(tab) {
     this.pageIndex ??= reuseIndex(await this.queryTabs(), this.learning);
-    const site = siteOf(this.pageIndex, tab);
-    if (!site) return [];
-    const keys = pageKeys(site, tab);
-    this.sentKeys.set(tab.id, { signature: site.signature, list: JSON.stringify(keys) });
+    const keys = pageKeys(this.pageIndex, tab);
+    if (!keys) return [];
+    this.sentKeys.set(tab.id, keys.join());
     return keys;
   }
 

@@ -17,6 +17,20 @@ globalThis.linkReuseURLRules = (() => {
     return url.href;
   }
 
+  // A 53-bit fingerprint of a match key (cyrb53). Pages get these instead of other tabs' addresses: a page can check a
+  // link it has, but can't read which pages are open.
+  function fingerprint(key) {
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < key.length; i++) {
+      const code = key.charCodeAt(i);
+      h1 = Math.imul(h1 ^ code, 2654435761);
+      h2 = Math.imul(h2 ^ code, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+  }
+
   function ruleIdentity(url, policy) {
     let rules = compiledPolicies.get(policy);
     if (!rules) {
@@ -99,5 +113,5 @@ globalThis.linkReuseURLRules = (() => {
     } catch { return {}; }
   }
 
-  return { normalizedKey, urlRules };
+  return { normalizedKey, urlRules, fingerprint };
 })();

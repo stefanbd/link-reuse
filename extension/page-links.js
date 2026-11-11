@@ -1,11 +1,11 @@
 // Handles link clicks on web pages from the moment a page starts loading, before its own scripts can act. New-tab
-// gestures go to the extension; a plain link to a page another tab on this site shows switches to that tab.
+// gestures go to the extension; a plain link to a page another tab shows switches to that tab.
 (() => {
   const mac = /^Mac/.test(navigator.platform);
   const topFrame = window.top === window;
   // False once an extension update orphans this script; clicks are then left to the browser.
   let enabled = true;
-  // Match keys of the other tabs on this site, kept current by the extension, and the rules to compute a link's keys.
+  // Fingerprints of the other tabs' match keys, kept current by the extension, and the rules to compute a link's keys.
   let reuseKeys = new Set();
   let rules = null;
 
@@ -32,11 +32,12 @@
     document.documentElement.append(notice);
   }
 
-  /** Whether another tab on this site shows url, by the same keys the background computes. */
+  /** Whether another tab shows url, by the same keys the background computes. */
   function shownElsewhere(url) {
     if (!rules || !reuseKeys.size) return false;
-    const { normalizedKey, urlRules } = globalThis.linkReuseURLRules;
-    return [url, normalizedKey(url, rules), urlRules(url, rules).identity].some(key => key && reuseKeys.has(key));
+    const { normalizedKey, urlRules, fingerprint } = globalThis.linkReuseURLRules;
+    return [url, normalizedKey(url, rules), urlRules(url, rules).identity]
+      .some(key => key && reuseKeys.has(fingerprint(key)));
   }
 
   /** Cancels the click once the extension has the request; settle() acts on the answer, however long it takes. */
@@ -69,7 +70,7 @@
     const target = linkTarget(anchor);
 
     if (!middle && !modified && target !== '_blank') {
-      // A plain link that loads in this tab. If another tab on this site shows it, switch there before the page or its
+      // A plain link that loads in this tab. If another tab shows it, switch there before the page or its
       // router sees the click; should that tab be gone by then, the link loads here after all. Other links: untouched.
       const url = anchor.href;
       const sameTab = topFrame && ['', '_self', '_top', '_parent'].includes(target) && /^https?:/i.test(url);

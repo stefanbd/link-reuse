@@ -1,3 +1,3 @@
 import './url-rules.js';
 
-export const { normalizedKey, urlRules } = globalThis.linkReuseURLRules;
+export const { normalizedKey, urlRules, fingerprint } = globalThis.linkReuseURLRules;

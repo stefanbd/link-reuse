@@ -45,9 +45,9 @@ async function start() {
 }
 
 /**
- * Chromium adds content scripts only to pages that load after an install or update, so a page left open across an update
- * would hand its links straight to the browser. Add them to the open tabs; the scripts an update orphaned there can no
- * longer reach the extension and leave each click to the new ones. Safari re-injects the scripts itself.
+ * Chromium adds content scripts only to pages that load after an install or update, so a page left open across an
+ * update would hand its links straight to the browser. Add them to the open tabs; the scripts an update orphaned there
+ * can no longer reach the extension and leave each click to the new ones. Safari re-injects the scripts itself.
  */
 async function injectOpenTabs() {
   for (const { matches, js, all_frames: allFrames = false } of chrome.runtime.getManifest().content_scripts) {

@@ -10,7 +10,7 @@ It works for links you open from other apps (Slack, mail, a link router) and for
 | Open a link from another app | Selects the tab already showing it, or opens one new tab |
 | ⌘-click (Ctrl-click on Windows) or middle-click a link | Moves the matching tab next to your current one without leaving your page, or opens a background tab as usual |
 | Click a link that opens a new tab, or ⇧⌘-click | Selects the matching tab, or opens a new one |
-| Click an ordinary link to a page another tab on the same site shows | Selects that tab and leaves your page where it is |
+| Click an ordinary link to a page another tab shows | Selects that tab and leaves your page where it is |
 
 Anything else stays with the browser: the right-click menu, bookmarks, the address bar, downloads and links inside
 frames.
@@ -78,7 +78,6 @@ The extension reloads itself and updates the pages that are already open, so not
 
 - The first time a link redirects somewhere new, it opens once. After that the redirect is known.
 - Switching to an open tab doesn't scroll it to a comment or section the link points at.
-- Ordinary clicks switch tabs only within the same site.
 - Learning stays in the browser profile. Sign-in pages and addresses carrying tokens are never learned, and private
   windows are ignored.
 - **StopTheMadness Pro** hides ⌘-clicks from Link Reuse in about half of Safari tabs when its *Protect ⌘-click* or

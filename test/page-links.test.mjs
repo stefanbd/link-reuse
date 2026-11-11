@@ -8,7 +8,7 @@ const rulesSource = readFileSync(new URL('../extension/url-rules.js', import.met
 const policy = JSON.parse(readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
 const settle = () => new Promise(setImmediate);
 
-// keys: the match keys of other tabs on this site that the extension hands the page when it starts.
+// keys: the match keys of other tabs, which the extension hands the page as fingerprints when it starts.
 function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], baseTarget, broken = false, framed = false } = {}) {
   const listeners = new Map(), sent = [], notices = [], skips = [], assigned = [], requests = [];
   let messageListener;
@@ -22,7 +22,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
     onMessage: { addListener(fn) { messageListener = fn; } },
     sendMessage(message) {
       if (message.type === 'page-skip') { skips.push(message.reason); return Promise.resolve(); }
-      if (message.type === 'page-keys') { requests.push(message); return Promise.resolve({ keys, rules: policy }); }
+      if (message.type === 'page-keys') { requests.push(message); return Promise.resolve({ keys: prints(keys), rules: policy }); }
       sent.push(message);
       if (broken) throw new Error('Extension context invalidated.');
       return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
@@ -35,6 +35,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
     location: { assign: url => assigned.push(url) } });
   vm.runInContext(rulesSource, context);
   vm.runInContext(source, context);
+  function prints(values) { return values.map(context.linkReuseURLRules.fingerprint); }
   const click = (attributes = {}, change = {}) => {
     const anchor = { localName: 'a', href: attributes.href ?? 'https://example.test/item', rel: attributes.rel ?? '',
       hasAttribute: name => name === 'href' || name in attributes,
@@ -47,7 +48,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
     return event;
   };
   // The extension pushing new keys after tabs changed.
-  const push = value => messageListener?.({ type: 'page-keys', keys: value });
+  const push = value => messageListener?.({ type: 'page-keys', keys: prints(value) });
   return { click, push, sent, notices, skips, assigned, requests };
 }
 

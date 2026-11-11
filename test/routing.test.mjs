@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { LiveLearning, routeToTab } from '../extension/matching.mjs';
 import { BrowserBridge as WindowsBridge } from '../extension/browser-bridge.mjs';
-import { urlRules } from '../extension/url-rules.mjs';
-import { reuseIndex, siteOf, pageKeys } from '../extension/page-keys.mjs';
+import { urlRules, fingerprint } from '../extension/url-rules.mjs';
+import { reuseIndex, pageKeys } from '../extension/page-keys.mjs';
 
-const keysOf = (index, tab) => { const site = siteOf(index, tab); return site && pageKeys(site, tab); };
+const prints = (...keys) => keys.map(fingerprint).sort((left, right) => left - right);
 import { safariTransport } from './safari-support.mjs';
 
 const policy = JSON.parse(readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
@@ -961,25 +961,26 @@ test('a maintenance pass messages only the pages whose keys changed, and a loadi
   const { bridge } = sessionBridge(h, learningSession(), { queryTabs: async () => { queries++; return h.tabs.map(tab => ({ ...tab })); } });
   const fire = async () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } await new Promise(setImmediate); await bridge.saving; };
   await fire();
-  // Each page gets the keys of the other tabs on its own site; the sleeping tab is listed but never contacted.
+  // Each page gets the other tabs' keys on every site; the sleeping tab is listed but never contacted.
   const keysOf = id => messages.filter(([tab]) => tab === id).map(([, keys]) => keys);
-  assert.deepEqual(keysOf(1), [['https://example.test/b', 'https://example.test/d']]);
-  assert.deepEqual(keysOf(2), [['https://example.test/a', 'https://example.test/d']]);
-  assert.deepEqual(keysOf(3), [[]]);
+  const [a, b, c, d] = ['https://example.test/a', 'https://example.test/b', 'https://other.test/c', 'https://example.test/d'];
+  assert.deepEqual(keysOf(1), [prints(b, c, d)]);
+  assert.deepEqual(keysOf(2), [prints(a, c, d)]);
+  assert.deepEqual(keysOf(3), [prints(a, b, d)]);
   assert.deepEqual(keysOf(4), []);
   assert.ok(messages.every(([, , options]) => options.frameId === 0));
   // Nothing changed for any page: no messages, however many passes.
   messages.length = 0;
   for (let i = 0; i < 3; i++) { bridge.changed(); await fire(); }
   assert.deepEqual(messages, []);
-  // A learned link to b reaches a's page only.
-  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/b' }]);
+  // A learned link to b reaches every page but b's own.
+  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: b }]);
   await fire();
-  assert.deepEqual(messages.map(([id]) => id), [1]);
-  assert.ok(messages[0][1].includes('https://example.test/short'));
+  assert.deepEqual(messages.map(([id]) => id), [1, 3]);
+  assert.ok(messages.every(([, keys]) => keys.includes(fingerprint('https://example.test/short'))));
   // A page that loads is answered from the last pass without another tab query, and is not messaged again unchanged.
   const before = queries;
-  assert.deepEqual(await bridge.keysFor({ id: 3, url: 'https://other.test/c' }), []);
+  assert.deepEqual(await bridge.keysFor({ id: 3, url: c }), prints(a, b, d, 'https://example.test/short'));
   assert.equal(queries, before);
   messages.length = 0;
   bridge.changed(); await fire();
@@ -1056,7 +1057,7 @@ test('a same-tab link switches to another tab showing it where it is, and never 
   assert.deepEqual(h.calls, [['window', 2, { focused: true }]]);
 });
 
-test('pages get the match keys of other tabs on their own site only, including learned links that lead there', async () => {
+test('pages get fingerprints of the other tabs\' match keys on every site, including learned links that lead there', async () => {
   const learning = new LiveLearning(policy);
   learning.observe([{ kind: 'redirect', source: 'https://acme.atlassian.net/l/short', destination: 'https://acme.atlassian.net/browse/OPS-7' }]);
   const tabs = [
@@ -1067,17 +1068,24 @@ test('pages get the match keys of other tabs on their own site only, including l
     { id: 5, url: 'https://acme.atlassian.net/browse/OPS-9', incognito: true },
   ];
   const index = reuseIndex(tabs, learning);
-  const jira = keysOf(index, tabs[0]);
-  // OPS-7's address, normalized address and issue identity, and the learned short link: nothing from GitHub, the login
-  // page or the private tab, and not the page's own issue.
-  assert.ok(jira.includes('https://acme.atlassian.net/browse/ops-7'));
-  assert.ok(jira.includes(JSON.stringify(['jira-issue', 'https://acme.atlassian.net', 'OPS-7', '', ''])));
-  assert.ok(jira.includes('https://acme.atlassian.net/l/short'));
-  assert.ok(!jira.some(key => key.includes('OPS-1') || key.includes('github') || key.includes('login') || key.includes('OPS-9')));
-  assert.deepEqual(keysOf(index, tabs[2]), []);
-  assert.equal(keysOf(index, tabs[4]), null);
-  assert.equal(keysOf(index, { id: 6, url: 'chrome://newtab/' }), null);
-  // Two tabs on one issue: each page sees the other one.
+  const jira = pageKeys(index, tabs[0]);
+  const github = pageKeys(index, tabs[2]);
+  const ops7 = ['https://acme.atlassian.net/browse/ops-7', JSON.stringify(['jira-issue', 'https://acme.atlassian.net', 'OPS-7', '', '']),
+    'https://acme.atlassian.net/l/short'];
+  // Only numbers reach a page: OPS-7's address, normalized address and issue identity and the learned short link, and
+  // the GitHub pull request. Never the login page, the private tab or the page's own issue.
+  assert.ok(jira.every(Number.isSafeInteger));
+  for (const key of [...ops7, 'https://github.com/acme/app/pull/9']) assert.ok(jira.includes(fingerprint(key)), key);
+  for (const key of ops7) assert.ok(github.includes(fingerprint(key)), key);
+  for (const key of ['https://acme.atlassian.net/login?token=secret', 'https://acme.atlassian.net/browse/OPS-9']) {
+    assert.ok(!jira.includes(fingerprint(key)) && !github.includes(fingerprint(key)), key);
+  }
+  assert.ok(!jira.includes(fingerprint('https://acme.atlassian.net/browse/OPS-1')));
+  assert.ok(github.includes(fingerprint('https://acme.atlassian.net/browse/OPS-1')));
+  assert.ok(!github.includes(fingerprint('https://github.com/acme/app/pull/9')));
+  assert.equal(pageKeys(index, tabs[4]), null);
+  assert.equal(pageKeys(index, { id: 6, url: 'chrome://newtab/' }), null);
+  // Two tabs on one page: each page sees the other one.
   const twin = reuseIndex([{ id: 1, url: 'https://example.test/a' }, { id: 2, url: 'https://example.test/a' }], learning);
-  assert.deepEqual(keysOf(twin, { id: 1, url: 'https://example.test/a' }), ['https://example.test/a']);
+  assert.deepEqual(pageKeys(twin, { id: 1, url: 'https://example.test/a' }), prints('https://example.test/a'));
 });

@@ -79,10 +79,11 @@ scripts can act:
 
 - **New-tab gestures** (⌘/Ctrl-click, middle-click, links that open a new tab) are cancelled and handed to the
   background.
-- **Ordinary same-tab links** use match keys pushed to each top-level page: the keys of the other tabs on its own origin,
-  never another site's (`extension/page-keys.mjs`). The background sends a page its list only when it changes. The
-  page then decides at the click itself, before the page or its router sees it. Other links send no message and add no
-  delay. If the matched tab has gone by the time the background acts, the link loads normally.
+- **Ordinary same-tab links** use match keys pushed to each top-level page: 53-bit fingerprints of the other tabs' keys,
+  on every site (`extension/page-keys.mjs`). A page can check a link it has but can't read which pages are open. The
+  background sends a page its list only when it changes. The page then decides at the click itself, before the page or
+  its router sees it. Other links send no message and add no delay. The background confirms the match before switching,
+  so a fingerprint collision or a tab that has gone just loads the link normally.
 - Right-click menus, downloads, Shift- and Alt-clicks, synthetic clicks and plain clicks inside frames keep the
   browser's behaviour.
 
