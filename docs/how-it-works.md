@@ -127,7 +127,9 @@ a failure can't produce a duplicate.
 Nothing in Link Reuse waits on a timer. A link waits as long as the browser takes, and ends only with the extension's
 answer or with an event that settles it: its connection ends, or the browser quits. Before it waits for a browser
 that isn't connected, the app checks that the extension is installed and enabled there, so a missing extension is
-reported at once instead of waited on.
+reported at once instead of waited on. Then it brings the browser forward: a running browser's front window comes to
+the front, and that focus connects the extension. Only a browser without a window is started, so a link never opens
+an extra window.
 
 An update's new helper takes over at once. Both installers stop the old helpers only once the new one is in place,
 and each old helper tells its extension it was replaced before it exits: on the Mac when it gets SIGTERM (Safari hears

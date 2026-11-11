@@ -141,7 +141,7 @@ internal sealed class NativeHost
         sessions.Renamed += (_, _) => changed.Release();
         sessions.Error += (_, _) => changed.Release();
         sessions.EnableRaisingEvents = true;
-        Browsers.Launch(browser);
+        Browsers.Show(browser);
         var quit = Browsers.Quit(browser);
         // Checked after the watch starts, so a session that connects in between is never missed.
         while (true)

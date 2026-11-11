@@ -72,26 +72,50 @@ internal static class Browsers
         throw new InvalidOperationException("The helper must be launched by a supported browser.");
     }
 
-    /// Completes when the browser quits: when each of its main processes in this session (its executable, not started
-    /// by itself) has exited. Its other processes come and go with its tabs.
-    internal static Task Quit(string id)
+    /// The browser's main processes in this session: its executable, not started by itself. Its other processes come and
+    /// go with its tabs.
+    private static HashSet<uint> Mains(string id)
     {
         var exe = Known[id].Exe;
-        using var self = Process.GetCurrentProcess();
         var processes = Processes();
-        var mains = new List<Task>();
-        foreach (var (pid, (parent, name)) in processes)
+        ProcessIdToSessionId((uint)Environment.ProcessId, out var session);
+        return processes.Where(entry => entry.Value.Name.Equals(exe, StringComparison.OrdinalIgnoreCase) &&
+                !(processes.TryGetValue(entry.Value.Parent, out var starter) && starter.Name.Equals(exe, StringComparison.OrdinalIgnoreCase)) &&
+                ProcessIdToSessionId(entry.Key, out var owner) && owner == session)
+            .Select(entry => entry.Key).ToHashSet();
+    }
+
+    /// Completes when the browser quits: when each of its main processes has exited.
+    internal static Task Quit(string id) => Task.WhenAll(Mains(id).Select(pid =>
+    {
+        try { return Process.GetProcessById((int)pid).WaitForExitAsync(); }
+        catch (ArgumentException) { return Task.CompletedTask; }
+    }));
+
+    /// Brings the browser forward, as opening it does on the Mac: its front window when it has one, restored when all are
+    /// minimized, so the focus wakes its extension. Only a browser without a window is started, which opens one.
+    internal static void Show(string id)
+    {
+        var mains = Mains(id);
+        IntPtr front = IntPtr.Zero, minimized = IntPtr.Zero;
+        // Top-level windows come front to back. A browser window is never owned, a tool window or always on top.
+        for (var window = FindWindowExW(IntPtr.Zero, IntPtr.Zero, "Chrome_WidgetWin_1", null); window != IntPtr.Zero && front == IntPtr.Zero;
+             window = FindWindowExW(IntPtr.Zero, window, "Chrome_WidgetWin_1", null))
         {
-            if (!name.Equals(exe, StringComparison.OrdinalIgnoreCase) ||
-                (processes.TryGetValue(parent, out var starter) && starter.Name.Equals(exe, StringComparison.OrdinalIgnoreCase))) continue;
-            try
-            {
-                var process = Process.GetProcessById((int)pid);
-                if (process.SessionId == self.SessionId) mains.Add(process.WaitForExitAsync());
-            }
-            catch (ArgumentException) { }
+            GetWindowThreadProcessId(window, out var owner);
+            if (!mains.Contains(owner) || !IsWindowVisible(window) || GetWindow(window, 4) != IntPtr.Zero ||
+                (GetWindowLongPtrW(window, -20) & 0x88) != 0) continue;
+            if (!IsIconic(window)) front = window;
+            else if (minimized == IntPtr.Zero) minimized = window;
         }
-        return Task.WhenAll(mains);
+        if (front == IntPtr.Zero && minimized != IntPtr.Zero)
+        {
+            front = minimized;
+            ShowWindow(front, 9);
+        }
+        // The app the link came from started this process, which lets it bring a window forward.
+        if (front != IntPtr.Zero) SetForegroundWindow(front);
+        else Launch(id);
     }
 
     /// Whether a profile of the browser has the extension installed and enabled, read from the profiles' preference
@@ -151,4 +175,13 @@ internal static class Browsers
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
     [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string className, string? title);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll")] private static extern nint GetWindowLongPtrW(IntPtr window, int index);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetForegroundWindow(IntPtr window);
 }
