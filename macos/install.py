@@ -46,21 +46,15 @@ def swap_contents(left, right):
         raise OSError(code, os.strerror(code))
 
 
-def stop_owned_processes():
+def owned_processes():
+    """This user's processes running the installed app: the router, the browser hosts and Safari's handler."""
     paths = {str(APP / path) for path in ['Contents/MacOS/LinkReuse', 'Contents/Helpers/LinkReuseHost',
                                          'Contents/PlugIns/LinkReuseSafari.appex/Contents/MacOS/LinkReuseSafari']}
-    for _ in range(30):
-        found = []
-        for line in subprocess.check_output(['ps', '-axo', 'pid=,uid=,comm='], text=True).splitlines():
-            values = line.strip().split(None, 2)
-            if len(values) == 3 and int(values[1]) == os.getuid() and values[2] in paths:
-                found.append(int(values[0]))
-        if not found: return
-        for pid in found:
-            try: os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError: pass
-        time.sleep(0.1)
-    raise RuntimeError('Link Reuse is still running. Disable its extension briefly, then run the installer again.')
+    found = set()
+    for line in subprocess.check_output(['ps', '-axo', 'pid=,uid=,comm='], text=True).splitlines():
+        values = line.strip().split(None, 2)
+        if len(values) == 3 and int(values[1]) == os.getuid() and values[2] in paths: found.add(int(values[0]))
+    return found
 
 
 def main():
@@ -84,7 +78,7 @@ def main():
             run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', APP, archive)
             with zipfile.ZipFile(archive) as saved:
                 if saved.testzip() is not None: raise RuntimeError('The rollback archive is damaged.')
-        stop_owned_processes()
+        previous = owned_processes()
         try:
             if replacing: swap_contents(APP / 'Contents', stage / 'Contents')
             else: stage.rename(APP)
@@ -107,13 +101,18 @@ def main():
                 work.mkdir(parents=True, exist_ok=True, mode=0o700)
                 APP.rename(stage)
             raise
+        # Only now end the replaced version: whatever restarts runs the new one, so each browser's extension reconnects
+        # to the new host at once.
+        for pid in previous & owned_processes():
+            try: os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError: pass
     finally:
         temporary.cleanup()
     shortcut = APP.parent / 'Link Reuse Extension'
     if not shortcut.exists() and not shortcut.is_symlink():
         shortcut.symlink_to(APP / 'Contents/Resources/extension', target_is_directory=True)
     print('Installed:', APP)
-    print('Enable Link Reuse in Safari Settings → Extensions. Reload it in Chromium browsers.')
+    print('Enable Link Reuse in Safari Settings → Extensions.')
 
 
 if __name__ == '__main__': main()

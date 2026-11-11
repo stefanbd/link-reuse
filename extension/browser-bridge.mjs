@@ -2,7 +2,6 @@ import { LiveLearning, routeToTab } from './matching.mjs';
 import { reuseIndex, pageKeys, changedKeys, pageChanges, pageRules } from './page-keys.mjs';
 
 const maxPending = 16;
-const maxReconnects = 4;
 
 /**
  * The extension's background: it routes links from the native app and from pages, keeps learning current, and gives
@@ -28,8 +27,9 @@ export class BrowserBridge {
     this.serial = Promise.resolve();
     this.pending = 0;
     this.revision = 0;
-    this.reconnectAttempts = 0;
+    this.reconnected = false; // a lost connection was reconnected since the user last acted
     this.changed();
+    void this.connect().catch(() => {});
   }
 
   observe(records) {
@@ -48,7 +48,6 @@ export class BrowserBridge {
 
   /** One pass at a time, so a slow browser can't pile up tab queries. */
   async maintain() {
-    void this.connect().catch(() => {});
     let revision;
     while (revision !== this.revision) {
       revision = this.revision;
@@ -119,24 +118,21 @@ export class BrowserBridge {
       .catch(() => { if (this.sentKeys.get(tabId) === message.version) this.sentKeys.delete(tabId); });
   }
 
-  /** User activity: reconnects the native app if needed, without a maintenance pass. */
+  /** The user acts: connects the native app if it isn't connected, and lets a lost connection reconnect at once. */
   activity() {
+    this.reconnected = false;
     void this.connect().catch(() => {});
   }
 
   /** Connects to the native app (once at a time), reloading the extension if the app brings a newer one. */
-  connect(force = false) {
+  connect() {
     if (this.port) return this.ready;
-    if (!force && Date.now() < (this.retryAt || 0)) return Promise.reject(new Error(this.lastError));
-    clearTimeout(this.reconnectTimer);
     const port = this.connectPort();
     this.port = port;
     this.ready = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => port.disconnect(), 5000);
       port.onMessage.addListener(message => {
         if (this.port !== port) return;
         if (message.type === 'ready') {
-          clearTimeout(timeout);
           const version = message.extensionVersion;
           if (typeof version === 'string' && this.extensionVersion && version !== this.extensionVersion) {
             this.lastError = 'Loading the updated extension…';
@@ -148,8 +144,6 @@ export class BrowserBridge {
             return;
           }
           this.connected = true;
-          if (port.transportConnected !== false) this.reconnectAttempts = 0;
-          clearTimeout(this.reconnectTimer);
           this.lastError = '';
           this.badge('');
           resolve();
@@ -158,22 +152,19 @@ export class BrowserBridge {
       });
       port.onDisconnect.addListener(() => {
         if (this.port !== port) return;
-        clearTimeout(timeout);
+        const lost = this.connected;
         this.port = undefined;
         this.connected = false;
-        // Safari's first retry is immediate; after that, and for Chromium, the wait doubles up to 20 seconds.
-        const attempt = this.reconnectAttempts - (port.authorizeCreation ? 1 : 0);
-        const delay = attempt < 0 ? 0 : Math.min(5000 * 2 ** attempt, 20000);
-        this.retryAt = Date.now() + delay;
-        this.lastError = this.disconnectMessage();
+        this.lastError = 'The browser helper is not connected. ' + (this.platform === 'mac'
+          ? 'Run the installed Link Reuse app with --install, then open this popup again.'
+          : 'Run link-reuse --install, then open this popup again.');
         this.badge('!');
         reject(new Error(this.lastError));
-        if (this.reconnectAttempts < maxReconnects) {
-          this.reconnectAttempts++;
-          this.reconnectTimer = setTimeout(() => {
-            this.reconnectTimer = undefined;
-            void this.connect(true).catch(() => {});
-          }, delay);
+        // A working connection ends when an update replaces the helper: connect again at once. Only once until the
+        // user acts, so a helper that keeps failing can't spin; a helper that never connected waits for them too.
+        if (lost && !this.reconnected) {
+          this.reconnected = true;
+          void this.connect().catch(() => {});
         }
       });
       port.postMessage({ type: 'hello' });
@@ -183,7 +174,6 @@ export class BrowserBridge {
 
   /** A link from the native app; the reply goes back over the same connection. */
   serveOpen(port, message) {
-    this.reconnectAttempts = 0;
     const reply = result => {
       if (this.port === port) port.postMessage({ type: 'result', id: message.id, ...result });
     };
@@ -194,13 +184,6 @@ export class BrowserBridge {
     const beforeCreate = port.authorizeCreation && (() => port.authorizeCreation(message.id, message.deadline));
     void this.open(message.url, { deadline: message.deadline, beforeCreate }, port)
       .then(reply, error => reply({ error: error.message }));
-  }
-
-  disconnectMessage() {
-    if (this.reconnectAttempts < maxReconnects) return 'Browser helper disconnected. Reconnecting automatically…';
-    return 'Could not reconnect to the browser helper. ' + (this.platform === 'mac'
-      ? 'Run the installed Link Reuse app with --install, then open this popup again.'
-      : 'Run link-reuse --install, then open this popup again.');
   }
 
   /** Routes one link. Links from the app and from pages share one queue, so two can never open the same tab twice. */
@@ -247,6 +230,7 @@ export class BrowserBridge {
 
   focused(windowId, focusedAt) {
     if (focusedAt > (this.windowFocusOrder.get(windowId) ?? -Infinity)) this.windowFocusOrder.set(windowId, focusedAt);
+    this.activity();
     if (this.connected) this.port.postMessage({ type: 'activity' });
   }
 
@@ -261,7 +245,8 @@ export class BrowserBridge {
   }
 
   async status() {
-    try { await this.connect(true); } catch (error) { this.lastError = error.message; }
+    this.activity();
+    await this.ready.catch(() => {});
     this.learning.prune(await this.queryTabs());
     await this.persist().catch(() => {});
     return {

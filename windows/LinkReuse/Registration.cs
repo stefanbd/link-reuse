@@ -140,8 +140,9 @@ internal static class Registration
     internal static void Defaults() => Process.Start(new ProcessStartInfo("ms-settings:defaultapps?registeredAppUser=LinkReuse") { UseShellExecute = true })?.Dispose();
     private static void StopHosts()
     {
-        foreach (var browser in Browsers.Known.Keys)
-        foreach (var session in NativeHost.LiveSessions(browser))
+        // The hosts running now are the previous version's. Listed before any is stopped, because a browser reconnects at
+        // once and its new host must keep running.
+        foreach (var session in Browsers.Known.Keys.SelectMany(NativeHost.LiveSessions).ToArray())
         {
             try
             {

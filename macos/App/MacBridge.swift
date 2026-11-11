@@ -57,9 +57,12 @@ enum MacBridge {
             let path = String(decoding: buffer.prefix(max(0, Int(count))).map { UInt8(bitPattern: $0) }, as: UTF8.self)
             var actual = stat()
             var expected = stat()
-            guard count > 0, Darwin.lstat(path, &actual) == 0, Darwin.lstat(host.path, &expected) == 0,
-                  actual.st_dev == expected.st_dev, actual.st_ino == expected.st_ino,
-                  processStarted(session.pid) == session.started else {
+            let alive = count > 0 && processStarted(session.pid) == session.started
+            guard alive, Darwin.lstat(path, &actual) == 0, Darwin.lstat(host.path, &expected) == 0,
+                  actual.st_dev == expected.st_dev, actual.st_ino == expected.st_ino else {
+                // A host left from a replaced version still holds its browser's connection, so that browser's extension
+                // couldn't connect to the installed host: end it.
+                if alive { kill(session.pid, SIGTERM) }
                 try? FileManager.default.removeItem(at: session.socket)
                 try? FileManager.default.removeItem(at: session.file)
                 return nil

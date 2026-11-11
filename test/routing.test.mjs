@@ -735,65 +735,57 @@ test('resource identities are supplied by URL rules while generic matching keeps
   assert.deepEqual(await routeToTab('https://catalog.test/items/43', learning, h.api), { result: 'opened' });
 });
 
-test('the extension reconnects automatically after an installed helper is replaced', async context => {
+test('a lost connection reconnects at once, so an updated helper takes over without a wait', async context => {
+  const pending = timers(context);
+  for (const safari of [false, true]) {
+    const ports = [];
+    const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
+      connectPort: () => {
+        const port = nativePort();
+        if (safari) Object.assign(port, { transportConnected: false, authorizeCreation: async () => {} });
+        ports.push(port);
+        return port;
+      } });
+    await bridge.connect();
+    ports[0].disconnect();
+    assert.equal(ports.length, 2);
+    await bridge.ready;
+    assert.equal(bridge.connected, true);
+  }
+  assert.equal(pending.size, 0);
+});
+
+test('a failing helper is retried when the user acts, never on a timer or a tab change', async context => {
   const pending = timers(context);
   const ports = [];
+  let missing = false;
   const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
-    connectPort: () => { const port = nativePort(); ports.push(port); return port; } });
-  await bridge.connect();
+    connectPort: () => { const port = nativePort(missing ? null : undefined); ports.push(port); return port; } });
+  const changeTabs = async () => { bridge.changed(); await settleBridge(bridge); };
+  await bridge.ready;
   ports[0].disconnect();
+  await bridge.ready;
+  ports[1].disconnect();
+  await changeTabs();
+  assert.equal(ports.length, 2, 'a connection lost again before the user acts waits for them');
   assert.equal(bridge.connected, false);
-  const [[id, retry]] = pending;
-  assert.equal(retry.delay, 5000);
-  pending.delete(id);
-  retry.fn();
-  await new Promise(setImmediate);
-  assert.equal(ports.length, 2);
-  assert.equal(bridge.connected, true);
-  assert.equal(bridge.reconnectAttempts, 0);
-  assert.equal(pending.size, 0);
-});
-
-test('a missing helper has four bounded reconnect attempts without permanent polling', async context => {
-  const pending = timers(context);
-  let connections = 0;
-  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
-    connectPort: () => { connections++; return nativePort(null); } });
-  await assert.rejects(bridge.connect());
-  for (const delay of [5000, 10000, 20000, 20000]) {
-    assert.equal(pending.size, 1);
-    const [[id, retry]] = pending;
-    assert.equal(retry.delay, delay);
-    pending.delete(id);
-    retry.fn();
-    await new Promise(setImmediate);
-  }
-  assert.equal(connections, 5);
-  assert.equal(pending.size, 0);
-  assert.match(bridge.lastError, /Could not reconnect/);
-});
-
-test('Safari recovery starts immediately without resetting its retry budget on logical readiness', async context => {
-  const pending = timers(context), ports = [];
-  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
-    connectPort: () => {
-      const port = nativePort();
-      port.transportConnected = false;
-      port.authorizeCreation = async () => {};
-      ports.push(port);
-      return port;
-    } });
-  await bridge.connect();
-  for (const delay of [0, 5000, 10000, 20000]) {
-    ports.at(-1).disconnect();
-    const [[id, retry]] = pending;
-    assert.equal(retry.delay, delay);
-    pending.delete(id);
-    retry.fn();
-    await new Promise(setImmediate);
-  }
-  ports.at(-1).disconnect();
-  assert.equal(ports.length, 5);
+  bridge.activity();
+  await bridge.ready;
+  ports[2].disconnect();
+  assert.equal(ports.length, 4, 'acting again allows another immediate reconnect');
+  missing = true;
+  ports[3].disconnect();
+  await changeTabs();
+  assert.equal(ports.length, 4);
+  bridge.activity();
+  await assert.rejects(bridge.ready);
+  bridge.focused(1, 1);
+  await assert.rejects(bridge.ready);
+  await changeTabs();
+  assert.equal(ports.length, 6, 'a helper that never connected is not retried by itself');
+  assert.equal((await bridge.status()).connected, false);
+  assert.equal(ports.length, 7);
+  assert.match(bridge.lastError, /link-reuse --install, then open this popup again/);
   assert.equal(pending.size, 0);
 });
 

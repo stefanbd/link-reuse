@@ -121,5 +121,10 @@ order across reloads.
 ## When something fails
 
 There is never a second way to open the same request. An uncertain result shows an error instead of trying again, so
-a failure can't produce a duplicate. A lost connection is retried at most four times, then waits for browser
-activity; nothing polls.
+a failure can't produce a duplicate.
+
+A connection that ends reconnects at once. That is how an update's new helper takes over: both installers stop the
+old helpers only once the new one is in place, so whatever starts next is new. If that reconnect ends too, or the
+helper never connected, the next tab switch, window focus or popup tries again; a helper that keeps failing can't
+spin. The Mac app ends a helper left from a replaced version when it finds one, so its browser connects to the
+installed one. Reconnecting never waits on a timer or polls.

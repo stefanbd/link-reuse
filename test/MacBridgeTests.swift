@@ -89,7 +89,22 @@ struct MacBridgeTests {
         abandoned.cancel()
         do { _ = try await abandoned.value; preconditionFailure("A cancelled wait returned") } catch is CancellationError {}
 
+        // A live host that isn't the installed one (left from a replaced version) is ended, so its browser reconnects.
+        let stale = Process()
+        stale.executableURL = URL(filePath: "/bin/sleep")
+        stale.arguments = ["30"]
+        try stale.run()
+        guard let staleStarted = MacBridge.processStarted(stale.processIdentifier) else { throw POSIXError(.ESRCH) }
+        let replaced = BridgeSession(id: UUID().uuidString, browser: "test.replaced", pid: stale.processIdentifier,
+                                     started: staleStarted, activeAt: 4)
+        defer { try? FileManager.default.removeItem(at: replaced.file) }
+        try replaced.save()
+        check(try MacBridge.sessions(browser: replaced.browser, host: host).isEmpty)
+        stale.waitUntilExit()
+        precondition(stale.terminationReason == .uncaughtSignal && stale.terminationStatus == SIGTERM)
+        check(!FileManager.default.fileExists(atPath: replaced.file.path))
+
         print("macOS IPC round trip, live-session selection, private permissions, bounded framing, lifecycle, " +
-              "extension detection and connection-wait checks passed")
+              "extension detection, connection-wait and replaced-host checks passed")
     }
 }
