@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pending: [OpenRequest] = []
     private var processing = false
     private var safari: SafariBridge?
+    private var termination: (any DispatchSourceSignal)?
     /// A browser being started for a link, and the wait for its extension to connect.
     private var starting: (bundleID: String, wait: Task<[BridgeSession], Error>)?
 
@@ -19,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(applicationTerminated(_:)),
             name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+        termination = onTermination { await self.safari?.replaced() }
         terminateIfUnused()
     }
 
@@ -143,6 +145,16 @@ func runCommand(failure: String? = nil, _ body: @escaping @Sendable () async thr
         catch { fputs((failure ?? error.localizedDescription) + "\n", stderr); exit(1) }
     }
     dispatchMain()
+}
+
+/// On SIGTERM, hands over and exits. An installer stops the version it replaces that way: each part first tells its
+/// extension, so the extension connects to the new version at once instead of waiting for the user.
+func onTermination(_ handOver: @escaping @Sendable () async -> Void) -> any DispatchSourceSignal {
+    signal(SIGTERM, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: SIGTERM)
+    source.setEventHandler { Task { await handOver(); exit(0) } }
+    source.activate()
+    return source
 }
 
 let arguments = CommandLine.arguments

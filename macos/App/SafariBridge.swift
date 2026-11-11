@@ -70,6 +70,13 @@ actor SafariBridge {
     /// Safari quit: the links still waiting for it end with error.
     func end(_ error: any Error) async { await exchange.finish(error) }
 
+    /// An installer is replacing the app: each connected extension hears so, and gets ready for the new one at once.
+    func replaced() async {
+        for client in clients.values where client.authenticated {
+            try? await send(BridgeMessage(type: "replaced"), to: client.connection)
+        }
+    }
+
     func stop() async {
         serving?.cancel()
         serving = nil

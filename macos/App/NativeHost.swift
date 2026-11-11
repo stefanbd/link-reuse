@@ -22,12 +22,16 @@ enum NativeHost {
         }
         let listener = Thread { serve(server, exchange: exchange) }
         listener.start()
+        let replaced = onTermination { [session] in
+            try? await exchange.send(BridgeMessage(type: "replaced"))
+            session.remove()
+        }
         defer {
+            replaced.cancel()
             listener.cancel()
             _ = shutdown(server, SHUT_RDWR)
             close(server)
-            try? FileManager.default.removeItem(at: session.socket)
-            try? FileManager.default.removeItem(at: session.file)
+            session.remove()
         }
         try await exchange.send(BridgeMessage(type: "ready", extensionVersion: resources.extensionVersion))
         try session.save()

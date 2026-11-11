@@ -69,6 +69,8 @@ export function connectNative(api, Socket = globalThis.WebSocket, extensionVersi
       }
       authenticated = true;
       flush();
+    } else if (authenticated && value.type === 'replaced') {
+      emit(value);
     } else if (authenticated && value.type === 'create-authorized' && typeof value.id === 'string') {
       const waiting = authorizations.get(value.id);
       authorizations.delete(value.id);

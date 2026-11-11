@@ -26,6 +26,17 @@ internal sealed class NativeHost
         using var process = Process.GetCurrentProcess();
         var session = new Session("linkreuse-" + Guid.NewGuid().ToString("N"), browser, process.Id, process.StartTime.ToUniversalTime().Ticks, DateTime.UtcNow.Ticks, browserProcessId);
         var file = Path.Combine(Registration.Sessions, session.Pipe + ".json");
+        // An installer replacing this helper sets the event named after its session: tell the extension, so it connects
+        // to the new helper at once, and end.
+        var replaced = new EventWaitHandle(false, EventResetMode.ManualReset, session.Pipe);
+        _ = Task.Run(async () =>
+        {
+            replaced.WaitOne();
+            try { await Send(new Message("replaced")); }
+            catch (Exception error) when (error is IOException or OperationCanceledException) { }
+            File.Delete(file);
+            Environment.Exit(0);
+        });
         var listener = Listen(session.Pipe);
         try
         {

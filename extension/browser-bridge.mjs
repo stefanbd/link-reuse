@@ -27,7 +27,6 @@ export class BrowserBridge {
     this.serial = Promise.resolve();
     this.pending = 0;
     this.revision = 0;
-    this.reconnected = false; // a lost connection was reconnected since the user last acted
     this.changed();
     void this.connect().catch(() => {});
   }
@@ -118,9 +117,8 @@ export class BrowserBridge {
       .catch(() => { if (this.sentKeys.get(tabId) === message.version) this.sentKeys.delete(tabId); });
   }
 
-  /** The user acts: connects the native app if it isn't connected, and lets a lost connection reconnect at once. */
+  /** The user acts: connects the native app if it isn't connected. */
   activity() {
-    this.reconnected = false;
     void this.connect().catch(() => {});
   }
 
@@ -129,9 +127,11 @@ export class BrowserBridge {
     if (this.port) return this.ready;
     const port = this.connectPort();
     this.port = port;
+    let replaced = false;
     this.ready = new Promise((resolve, reject) => {
       port.onMessage.addListener(message => {
         if (this.port !== port) return;
+        if (message.type === 'replaced') replaced = true;
         if (message.type === 'ready') {
           const version = message.extensionVersion;
           if (typeof version === 'string' && this.extensionVersion && version !== this.extensionVersion) {
@@ -152,7 +152,6 @@ export class BrowserBridge {
       });
       port.onDisconnect.addListener(() => {
         if (this.port !== port) return;
-        const lost = this.connected;
         this.port = undefined;
         this.connected = false;
         this.lastError = 'The browser helper is not connected. ' + (this.platform === 'mac'
@@ -160,12 +159,9 @@ export class BrowserBridge {
           : 'Run link-reuse --install, then open this popup again.');
         this.badge('!');
         reject(new Error(this.lastError));
-        // A working connection ends when an update replaces the helper: connect again at once. Only once until the
-        // user acts, so a helper that keeps failing can't spin; a helper that never connected waits for them too.
-        if (lost && !this.reconnected) {
-          this.reconnected = true;
-          void this.connect().catch(() => {});
-        }
+        // An update stopped the helper and it said so: connect to the new one at once. A helper that ends by itself
+        // waits for the user's next action, so one that keeps failing can't spin.
+        if (replaced) void this.connect().catch(() => {});
       });
       port.postMessage({ type: 'hello' });
     });

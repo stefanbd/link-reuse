@@ -50,6 +50,18 @@ test('Safari connects once and sends opens/results over its authenticated local 
   port.disconnect();
 });
 
+test('Safari passes on the app saying an update replaced it, so the extension gets ready for the new one', async () => {
+  const h = safariTransport();
+  const port = connectNative(h.api, h.Socket);
+  const messages = [];
+  port.onMessage.addListener(message => messages.push(message));
+  port.postMessage({ type: 'hello' });
+  await new Promise(setImmediate);
+  h.emit({ type: 'replaced' });
+  assert.deepEqual(messages.at(-1), { type: 'replaced' });
+  port.disconnect();
+});
+
 test('Safari learning is ready without launching the routing app', () => {
   const h = safariTransport({ automatic: false });
   const port = connectNative(h.api, h.Socket);

@@ -713,7 +713,7 @@ test('resource identities are supplied by URL rules while generic matching keeps
   assert.deepEqual(await routeToTab('https://catalog.test/items/43', learning, h.api), { result: 'opened' });
 });
 
-test('a lost connection reconnects at once, so an updated helper takes over without a wait', async context => {
+test('each helper an update replaces says so and is reconnected at once, however many in a row', async context => {
   const pending = timers(context);
   for (const safari of [false, true]) {
     const ports = [];
@@ -724,16 +724,19 @@ test('a lost connection reconnects at once, so an updated helper takes over with
         ports.push(port);
         return port;
       } });
-    await bridge.connect();
-    ports[0].disconnect();
-    assert.equal(ports.length, 2);
+    for (let update = 1; update <= 3; update++) {
+      await bridge.ready;
+      ports.at(-1).emit({ type: 'replaced' });
+      ports.at(-1).disconnect();
+      assert.equal(ports.length, update + 1);
+    }
     await bridge.ready;
     assert.equal(bridge.connected, true);
   }
   assert.equal(pending.size, 0);
 });
 
-test('a failing helper is retried when the user acts, never on a timer or a tab change', async context => {
+test('a helper that ends by itself is retried when the user acts, never on a timer or a tab change', async context => {
   const pending = timers(context);
   const ports = [];
   let missing = false;
@@ -742,27 +745,24 @@ test('a failing helper is retried when the user acts, never on a timer or a tab 
   const changeTabs = async () => { bridge.changed(); await settleBridge(bridge); };
   await bridge.ready;
   ports[0].disconnect();
-  await bridge.ready;
-  ports[1].disconnect();
   await changeTabs();
-  assert.equal(ports.length, 2, 'a connection lost again before the user acts waits for them');
+  assert.equal(ports.length, 1, 'a connection that ends without a replacement waits for the user');
   assert.equal(bridge.connected, false);
   bridge.activity();
   await bridge.ready;
-  ports[2].disconnect();
-  assert.equal(ports.length, 4, 'acting again allows another immediate reconnect');
+  assert.equal(ports.length, 2);
   missing = true;
-  ports[3].disconnect();
+  ports[1].disconnect();
   await changeTabs();
-  assert.equal(ports.length, 4);
+  assert.equal(ports.length, 2);
   bridge.activity();
   await assert.rejects(bridge.ready);
   bridge.focused(1, 1);
   await assert.rejects(bridge.ready);
   await changeTabs();
-  assert.equal(ports.length, 6, 'a helper that never connected is not retried by itself');
+  assert.equal(ports.length, 4, 'a helper that never connected is not retried by itself');
   assert.equal((await bridge.status()).connected, false);
-  assert.equal(ports.length, 7);
+  assert.equal(ports.length, 5);
   assert.match(bridge.lastError, /link-reuse --install, then open this popup again/);
   assert.equal(pending.size, 0);
 });

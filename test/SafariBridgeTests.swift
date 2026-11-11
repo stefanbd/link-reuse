@@ -135,6 +135,10 @@ struct SafariBridgeTests {
         try await idle.extensionReady()
         let idleWakes = await idleDeliveries.count
         precondition(idleWakes == 1)
+        // An installer replacing the app: the connected extension hears so first.
+        await idle.replaced()
+        let replaced = try await receive(idleSocket)
+        precondition(replaced.type == "replaced")
         await idle.stop()
 
         // Connections that never authenticate can't keep the extension out: at capacity the oldest makes room.
@@ -167,6 +171,6 @@ struct SafariBridgeTests {
         catch let error as POSIXError { precondition(error.code == .ECANCELED) }
         await crowded.stop()
         print("Safari loopback-only WebSocket, token authentication, one-time bootstrap, warm reuse, disconnect handling, " +
-              "room for the extension and Safari quitting passed")
+              "room for the extension, app replacement and Safari quitting passed")
     }
 }

@@ -119,7 +119,6 @@ internal static class Registration
     {
         using var command = Registry.CurrentUser.OpenSubKey(ProgId + @"\shell\open\command");
         if (!string.Equals(command?.GetValue(null) as string, $"\"{Exe}\" \"%1\"", StringComparison.OrdinalIgnoreCase)) return;
-        StopHosts();
         Registry.CurrentUser.DeleteSubKeyTree(ProgId, false);
         Registry.CurrentUser.DeleteSubKeyTree(Client, false);
         using (var registered = Registry.CurrentUser.OpenSubKey(@"Software\RegisteredApplications", true)) registered?.DeleteValue("LinkReuse", false);
@@ -132,6 +131,8 @@ internal static class Registration
             Registry.CurrentUser.DeleteSubKeyTree(key, false);
             File.Delete(file);
         }
+        // Only once the browsers can no longer start a host: an extension reconnects at once when its host is stopped.
+        StopHosts();
         var hosts = Path.Combine(Root, "host");
         if (Directory.Exists(hosts)) Directory.Delete(hosts, true);
         SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
@@ -147,11 +148,14 @@ internal static class Registration
             try
             {
                 using var process = Process.GetProcessById(session.ProcessId);
-                process.Kill();
+                // A host hands over when the event named after its session is set: it tells its extension to connect to
+                // the new host. One from before 0.1.24 has no event and is stopped.
+                if (EventWaitHandle.TryOpenExisting(session.Pipe, out var replaced)) using (replaced) replaced.Set();
+                else process.Kill();
                 process.WaitForExit();
                 File.Delete(Path.Combine(Sessions, session.Pipe + ".json"));
             }
-            catch (Exception error) when (error is ArgumentException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception) { }
+            catch (Exception error) when (error is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception) { }
         }
     }
     private static void Set(string path, string? name, string value) { using var key = Registry.CurrentUser.CreateSubKey(path); key.SetValue(name, value); }

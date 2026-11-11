@@ -101,8 +101,8 @@ def main():
                 work.mkdir(parents=True, exist_ok=True, mode=0o700)
                 APP.rename(stage)
             raise
-        # Only now end the replaced version: whatever restarts runs the new one, so each browser's extension reconnects
-        # to the new host at once.
+        # Only now end the replaced version: each part tells its extension it was replaced, so the extension connects
+        # to the new one at once.
         for pid in previous & owned_processes():
             try: os.kill(pid, signal.SIGTERM)
             except ProcessLookupError: pass

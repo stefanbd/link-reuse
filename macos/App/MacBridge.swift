@@ -17,6 +17,11 @@ struct BridgeSession: Codable, Sendable {
         try data.write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: socket)
+        try? FileManager.default.removeItem(at: file)
+    }
 }
 
 enum MacBridge {
@@ -61,10 +66,9 @@ enum MacBridge {
             guard alive, Darwin.lstat(path, &actual) == 0, Darwin.lstat(host.path, &expected) == 0,
                   actual.st_dev == expected.st_dev, actual.st_ino == expected.st_ino else {
                 // A host left from a replaced version still holds its browser's connection, so that browser's extension
-                // couldn't connect to the installed host: end it.
+                // couldn't connect to the installed host: end it (it tells its extension to connect to the new one).
                 if alive { kill(session.pid, SIGTERM) }
-                try? FileManager.default.removeItem(at: session.socket)
-                try? FileManager.default.removeItem(at: session.file)
+                session.remove()
                 return nil
             }
             return session

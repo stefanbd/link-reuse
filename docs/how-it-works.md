@@ -129,8 +129,10 @@ answer or with an event that settles it: its connection ends, or the browser qui
 that isn't connected, the app checks that the extension is installed and enabled there, so a missing extension is
 reported at once instead of waited on.
 
-A connection that ends reconnects at once. That is how an update's new helper takes over: both installers stop the
-old helpers only once the new one is in place, so whatever starts next is new. If that reconnect ends too, or the
-helper never connected, the next tab switch, window focus or popup tries again; a helper that keeps failing can't
-spin. The Mac app ends a helper left from a replaced version when it finds one, so its browser connects to the
+An update's new helper takes over at once. Both installers stop the old helpers only once the new one is in place,
+and each old helper tells its extension it was replaced before it exits: on the Mac when it gets SIGTERM (Safari hears
+it from the app), on Windows when the installer sets the event named after its session. The extension then connects
+to the new helper straight away, however many updates come in a row. A connection that ends any other way, or a
+helper that never connected, waits for the next tab switch, window focus or popup, so a helper that keeps failing
+can't spin. The Mac app ends a helper left from a replaced version when it finds one, so its browser connects to the
 installed one.
