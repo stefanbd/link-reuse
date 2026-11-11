@@ -132,19 +132,11 @@ chrome.windows.onRemoved.addListener(windowId => { void ready.then(({ bridge }) 
 
 const skipReasons = new Set(['disabled', 'prevented', 'other', 'button', 'anchor', 'target']);
 
-/** What a page needs to compute a link's keys itself: the URL rules, without the learning limits. */
-const pageRules = ({ maxURLBytes, noiseQueryKeys, noiseQueryPrefixes, identityRules }) =>
-  ({ maxURLBytes, noiseQueryKeys, noiseQueryPrefixes, identityRules });
-
-/** A page's request: its keys when it starts, or a link to route. */
-async function answerPage(message, sender, { bridge, policy }) {
-  const topFrame = sender.frameId === 0;
-  if (message.type === 'page-keys') {
-    return topFrame ? { keys: await bridge.keysFor(sender.tab), rules: pageRules(policy) } : null;
-  }
+/** A link a page hands over to route. */
+async function answerPage(message, sender, { bridge }) {
   // A same-tab link only ever switches to another tab; otherwise the page loads it itself.
   const sameTab = message.type === 'page-navigate';
-  if (sameTab && !topFrame) return { result: 'none' };
+  if (sameTab && sender.frameId !== 0) return { result: 'none' };
   const opening = sameTab
     ? { sourceTabId: sender.tab.id, reuseOnly: true }
     : { sourceTabId: sender.tab.id, active: message.active !== false };
@@ -173,9 +165,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   const tab = sender.tab;
   const topFrame = tab && sender.frameId === 0;
   switch (message.type) {
+    case 'page-keys':
+      if (topFrame && !tab.incognito) void ready.then(({ bridge }) => bridge.requestKeys(tab)).catch(() => {});
+      return;
     case 'page-link':
     case 'page-navigate':
-    case 'page-keys':
       if (!tab || tab.incognito) return;
       void ready.then(context => answerPage(message, sender, context))
         .then(respond, error => respond({ error: error.message }));

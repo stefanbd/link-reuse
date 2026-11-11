@@ -8,8 +8,9 @@ const rulesSource = readFileSync(new URL('../extension/url-rules.js', import.met
 const policy = JSON.parse(readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
 const settle = () => new Promise(setImmediate);
 
-// keys: the match keys of other tabs, which the extension hands the page as fingerprints when it starts.
-function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], baseTarget, broken = false, framed = false } = {}) {
+// keys: the match keys of other tabs, which the extension sends the page as fingerprints when it asks. here: its address.
+function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], baseTarget, broken = false, framed = false,
+  here = 'https://example.test/here' } = {}) {
   const listeners = new Map(), sent = [], notices = [], skips = [], assigned = [], requests = [];
   let messageListener;
   const node = () => ({ style: {}, setAttribute() {}, addEventListener() {}, append() {}, remove() {} });
@@ -22,7 +23,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
     onMessage: { addListener(fn) { messageListener = fn; } },
     sendMessage(message) {
       if (message.type === 'page-skip') { skips.push(message.reason); return Promise.resolve(); }
-      if (message.type === 'page-keys') { requests.push(message); return Promise.resolve({ keys: prints(keys), rules: policy }); }
+      if (message.type === 'page-keys') { requests.push(message); queueMicrotask(() => push(keys)); return Promise.resolve(); }
       sent.push(message);
       if (broken) throw new Error('Extension context invalidated.');
       return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
@@ -32,7 +33,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
   window.top = framed ? {} : window;
   const context = vm.createContext({ chrome: { runtime }, document, URL, TextEncoder, TextDecoder, atob, window,
     navigator: { platform: platform === 'mac' ? 'MacIntel' : 'Win32' },
-    location: { assign: url => assigned.push(url) } });
+    location: { href: here, assign: url => assigned.push(url) } });
   vm.runInContext(rulesSource, context);
   vm.runInContext(source, context);
   function prints(values) { return values.map(context.linkReuseURLRules.fingerprint); }
@@ -47,9 +48,12 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
     listeners.get(event.type)(event);
     return event;
   };
-  // The extension pushing new keys after tabs changed.
-  const push = value => messageListener?.({ type: 'page-keys', keys: prints(value) });
-  return { click, push, sent, notices, skips, assigned, requests };
+  // The extension sending the full list, or a change to the list at version base.
+  let version = 0;
+  function push(value) { messageListener?.({ type: 'page-keys', version: ++version, keys: prints(value), rules: policy }); }
+  const change = (added, removed, base = version) =>
+    messageListener?.({ type: 'page-keys', base, version: ++version, added: prints(added), removed: prints(removed) });
+  return { click, push, change, sent, notices, skips, assigned, requests, listeners };
 }
 
 test('new-tab webpage gestures cancel the default before requesting one shared route', async () => {
@@ -143,7 +147,7 @@ test('new-tab gestures left to the browser report a URL-free reason; ordinary cl
   assert.deepEqual(h.skips, ['anchor', 'anchor', 'prevented']);
 });
 
-test('a plain link to a page another tab on this site shows switches at the click, before the page or its router sees it', async () => {
+test('a plain link to a page another tab shows switches at the click, before the page or its router sees it', async () => {
   const h = harness({ keys: ['https://example.test/item'] });
   assert.equal(h.requests.length, 1);
   await settle();
@@ -192,7 +196,7 @@ test('the switch has no time limit; if the tab is gone by then, or the extension
   }
 });
 
-test('a plain link no other tab on this site shows is left alone, with no message at all', async () => {
+test('a plain link no other tab shows is left alone, with no message at all', async () => {
   for (const keys of [[], ['https://example.test/other']]) {
     const h = harness({ keys });
     await settle();
@@ -210,6 +214,41 @@ test('before the keys arrive, a plain link is left alone; pushed keys take effec
   h.push([]);
   assert.equal(h.click().cancelled, undefined);
   assert.equal(h.sent.length, 1);
+});
+
+test('the page applies changes only to the list it holds, and asks for its full list after missing one', async () => {
+  const h = harness();
+  await settle();
+  assert.equal(h.requests.length, 1);
+  h.change(['https://example.test/item'], []);
+  assert.equal(h.click().cancelled, true);
+  h.change([], ['https://example.test/item']);
+  assert.equal(h.click().cancelled, undefined);
+  // A change to a list this page doesn't hold is ignored, and the page asks again; the full list replaces its own.
+  h.change(['https://example.test/item'], [], 99);
+  assert.equal(h.click().cancelled, undefined);
+  assert.equal(h.requests.length, 2);
+  await settle();
+  h.change(['https://example.test/item'], []);
+  assert.equal(h.click().cancelled, true);
+  // Restored from the back/forward cache, it may have missed changes: it asks again. A normal show doesn't.
+  h.listeners.get('pageshow')({ persisted: false });
+  h.listeners.get('pageshow')({ persisted: true });
+  assert.equal(h.requests.length, 3);
+});
+
+test('a link to the page you are on stays here, even when another tab shows that page too', async () => {
+  const issue = 'https://acme.atlassian.net/browse/OPS-7';
+  const identity = JSON.stringify(['jira-issue', 'https://acme.atlassian.net', 'OPS-7', '', '']);
+  for (const [here, href, keys] of [
+    ['https://example.test/item', 'https://example.test/item', ['https://example.test/item']],
+    [issue, issue + '?focusedCommentId=4#comment-4', [identity]],
+  ]) {
+    const h = harness({ here, keys });
+    await settle();
+    assert.equal(h.click({ href }).cancelled, undefined, href);
+    assert.equal(h.sent.length, 0);
+  }
 });
 
 test('frames, other targets, downloads, modified and synthetic clicks never switch for a plain link', async () => {

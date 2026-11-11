@@ -32,12 +32,14 @@
     document.documentElement.append(notice);
   }
 
-  /** Whether another tab shows url, by the same keys the background computes. */
+  /** Whether another tab shows url, by the same keys the background computes. A link to this page stays here. */
   function shownElsewhere(url) {
     if (!rules || !reuseKeys.size) return false;
     const { normalizedKey, urlRules, fingerprint } = globalThis.linkReuseURLRules;
-    return [url, normalizedKey(url, rules), urlRules(url, rules).identity]
-      .some(key => key && reuseKeys.has(fingerprint(key)));
+    const keys = value => [value, normalizedKey(value, rules), urlRules(value, rules).identity]
+      .filter(Boolean).map(fingerprint);
+    const link = keys(url), here = keys(location.href);
+    return !link.some(key => here.includes(key)) && link.some(key => reuseKeys.has(key));
   }
 
   /** Cancels the click once the extension has the request; settle() acts on the answer, however long it takes. */
@@ -96,14 +98,23 @@
   window.addEventListener('auxclick', onClick, true);
 
   if (!topFrame) return;
+  // The extension sends the full list when the page asks, then only what changed. Each change names the list it
+  // applies to, so a page that missed one (or was restored from the back/forward cache) asks again.
+  let version;
+  function askForKeys() {
+    try { void chrome.runtime.sendMessage({ type: 'page-keys' }).catch(() => {}); } catch { enabled = false; }
+  }
   chrome.runtime.onMessage.addListener(message => {
-    if (message?.type === 'page-keys' && Array.isArray(message.keys)) reuseKeys = new Set(message.keys);
+    if (message?.type !== 'page-keys') return;
+    if (Array.isArray(message.keys)) {
+      reuseKeys = new Set(message.keys);
+      rules = message.rules;
+    } else if (message.base === version && Array.isArray(message.added) && Array.isArray(message.removed)) {
+      for (const key of message.added) reuseKeys.add(key);
+      for (const key of message.removed) reuseKeys.delete(key);
+    } else return askForKeys();
+    version = message.version;
   });
-  try {
-    void chrome.runtime.sendMessage({ type: 'page-keys' }).then(reply => {
-      if (!reply || !Array.isArray(reply.keys)) return;
-      rules = reply.rules;
-      reuseKeys = new Set(reply.keys);
-    }, () => {});
-  } catch { enabled = false; }
+  window.addEventListener('pageshow', event => { if (event.persisted) askForKeys(); });
+  askForKeys();
 })();

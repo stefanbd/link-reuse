@@ -1,5 +1,5 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
-import { reuseIndex, pageKeys } from './page-keys.mjs';
+import { reuseIndex, pageKeys, changedKeys, pageChanges, pageRules } from './page-keys.mjs';
 
 const maxPending = 16;
 const maxReconnects = 4;
@@ -21,7 +21,9 @@ export class BrowserBridge {
     this.learning.restore(learningState);
     this.saving = Promise.resolve();
     this.windowFocusOrder = new Map();
-    this.sentKeys = new Map(); // what each page was last sent
+    this.sentKeys = new Map(); // the version of the list each page holds
+    this.keysVersion = 0;
+    this.pagesKnown = false;
     this.lastError = '';
     this.serial = Promise.resolve();
     this.pending = 0;
@@ -35,60 +37,86 @@ export class BrowserBridge {
     this.changed();
   }
 
-  /** Schedules a maintenance pass for a change in tabs or learning. */
+  /** Starts a maintenance pass for a change in tabs or learning, or one more after the pass in progress. */
   changed() {
     this.revision++;
-    if (this.timer || this.maintaining) return;
-    this.timer = setTimeout(() => void this.maintain(), 50);
+    if (this.maintaining) return;
+    this.maintaining = true;
+    // After the current task, so changes made together share one pass.
+    queueMicrotask(() => void this.maintain());
   }
 
-  /** One pass at a time, so a slow browser can't pile up tab queries; changes during a pass get one more pass. */
+  /** One pass at a time, so a slow browser can't pile up tab queries. */
   async maintain() {
-    this.timer = undefined;
-    this.maintaining = true;
     void this.connect().catch(() => {});
-    const revision = this.revision;
-    try {
-      const tabs = await this.queryTabs();
-      if (revision === this.revision) {
+    let revision;
+    while (revision !== this.revision) {
+      revision = this.revision;
+      const learned = this.learning.revision;
+      try {
+        const tabs = await this.queryTabs();
+        // A tab list from before a change in tabs or learning could prune what was just learned: query again.
+        if (revision !== this.revision || learned !== this.learning.revision) {
+          revision = undefined;
+          continue;
+        }
         this.learning.prune(tabs);
         this.publish(tabs);
         await this.persist();
-      }
-    } catch {} finally {
-      this.maintaining = false;
+      } catch {}
     }
-    if (revision !== this.revision && !this.timer) this.timer = setTimeout(() => void this.maintain(), 50);
+    this.maintaining = false;
   }
 
   /**
-   * Sends each page the fingerprints of the other tabs' match keys, so it can decide a plain link click at the click.
-   * Only pages whose keys changed are messaged.
+   * Keeps each page's list of other tabs' keys current, so it can decide a plain link click at the click. A page gets
+   * its full list when it asks; after that only what changed, and only when something did.
    */
   publish(tabs) {
-    this.pageIndex = reuseIndex(tabs, this.learning);
+    const previous = this.pageIndex;
+    const index = this.pageIndex = reuseIndex(tabs, this.learning);
     const live = new Set(tabs.map(tab => tab.id));
     for (const id of this.sentKeys.keys()) if (!live.has(id)) this.sentKeys.delete(id);
+    // A started background doesn't know what open pages hold, so its first pass sends each one its full list.
+    const changed = this.pagesKnown ? changedKeys(previous, index) : null;
+    this.pagesKnown = true;
+    if (changed?.length === 0) return;
+    this.keysVersion++;
     for (const tab of tabs) {
-      const keys = !tab.discarded && pageKeys(this.pageIndex, tab);
-      if (!keys) continue;
-      const list = keys.join();
-      if (this.sentKeys.get(tab.id) === list) continue;
-      this.sentKeys.set(tab.id, list);
-      // A page without the script gets its keys when it next loads; a failed send is retried on the next pass.
-      void Promise.resolve()
-        .then(() => this.browserAPI.tabs.sendMessage(tab.id, { type: 'page-keys', keys }, { frameId: 0 }))
-        .catch(() => this.sentKeys.delete(tab.id));
+      if (tab.discarded) continue;
+      const base = this.sentKeys.get(tab.id);
+      if (!changed) this.sendKeys(tab);
+      else if (base !== undefined) {
+        const { added, removed } = pageChanges(changed, previous, index, tab);
+        if (added.length || removed.length) {
+          this.deliver(tab.id, { type: 'page-keys', base, version: this.keysVersion, added, removed });
+        }
+      }
     }
   }
 
-  /** A loading page's keys: from the last pass, or from current tabs in a freshly started background. */
-  async keysFor(tab) {
-    this.pageIndex ??= reuseIndex(await this.queryTabs(), this.learning);
+  /** A page asking for its full list: when it loads, or when it missed a change. */
+  async requestKeys(tab) {
+    if (!this.pageIndex) {
+      const tabs = await this.queryTabs();
+      this.pageIndex ??= reuseIndex(tabs, this.learning);
+    }
+    this.sendKeys(tab);
+  }
+
+  sendKeys(tab) {
     const keys = pageKeys(this.pageIndex, tab);
-    if (!keys) return [];
-    this.sentKeys.set(tab.id, keys.join());
-    return keys;
+    if (keys) {
+      this.deliver(tab.id, { type: 'page-keys', version: this.keysVersion, keys, rules: pageRules(this.policy) });
+    }
+  }
+
+  /** Every list reaches a page by this one channel, in order. A page that can't be reached asks when it loads. */
+  deliver(tabId, message) {
+    this.sentKeys.set(tabId, message.version);
+    void Promise.resolve()
+      .then(() => this.browserAPI.tabs.sendMessage(tabId, message, { frameId: 0 }))
+      .catch(() => { if (this.sentKeys.get(tabId) === message.version) this.sentKeys.delete(tabId); });
   }
 
   /** User activity: reconnects the native app if needed, without a maintenance pass. */

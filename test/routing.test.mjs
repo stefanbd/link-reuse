@@ -80,12 +80,7 @@ function sessionBridge(h, session, extra = {}) {
   return { bridge, port };
 }
 
-async function settleBridge(bridge, pending) {
-  const timer = pending.get(bridge.timer);
-  if (timer) {
-    pending.delete(bridge.timer);
-    timer.fn();
-  }
+async function settleBridge(bridge) {
   await new Promise(setImmediate);
   await bridge.saving;
 }
@@ -100,19 +95,17 @@ test('sleeping and unloaded tabs are selected without content scripts, reloads o
   }
 });
 
-test('a restarted worker restores learned links and reuses sleeping redirect and canonical destinations', async context => {
-  const pending = timers(context);
+test('a restarted worker restores learned links and reuses sleeping redirect and canonical destinations', async () => {
   const h = browser([{ url: 'https://example.test/item', frozen: true },
     { url: 'https://shop.test/products/42/reviews', discarded: true, status: 'unloaded' }]);
   const session = learningSession();
   const first = sessionBridge(h, session).bridge;
   first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url },
     { kind: 'canonical', source: h.tabs[1].url, destination: 'https://shop.test/products/42' }]);
-  await settleBridge(first, pending);
+  await settleBridge(first);
   assert.equal(session.read()?.length, 2);
   const second = sessionBridge(h, session);
   await second.bridge.connect();
-  clearTimeout(second.bridge.timer);
   second.port.emit({ type: 'open', id: 'redirect', url: 'https://example.test/short' });
   second.port.emit({ type: 'open', id: 'canonical', url: 'https://shop.test/products/42' });
   await second.bridge.serial;
@@ -121,20 +114,18 @@ test('a restarted worker restores learned links and reuses sleeping redirect and
   assert.equal(h.calls.some(call => call[0].startsWith('create')), false);
 });
 
-test('restored learning is pruned against current tabs before it can match', async context => {
-  const pending = timers(context);
+test('restored learning is pruned against current tabs before it can match', async () => {
   const h = browser([{ url: 'https://example.test/live' }]);
   const session = learningSession();
   const first = sessionBridge(h, session).bridge;
   first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
-  await settleBridge(first, pending);
+  await settleBridge(first);
   for (const tabs of [[], [{ id: 1, url: 'https://example.test/elsewhere', status: 'complete' }],
     [{ id: 1, url: 'https://example.test/live', discarded: true, status: 'unloaded', incognito: true }]]) {
     const current = browser(tabs);
     const restarted = sessionBridge(current, session).bridge;
     assert.deepEqual(await routeToTab('https://example.test/short', restarted.learning, current.api), { result: 'opened' });
     assert.equal(restarted.learning.records.size, 0);
-    clearTimeout(restarted.timer);
   }
 });
 
@@ -148,16 +139,15 @@ test('owned sign-in tabs survive worker restarts without saving their authentica
   Object.assign(h.tabs[0], { pendingUrl: undefined,
     url: 'https://example-production.snowflakecomputing.com/oauth/authorize?state=private&code_challenge=private',
     discarded: true, status: 'unloaded' });
-  await settleBridge(first, pending);
+  first.changed();
+  await settleBridge(first);
   assert.deepEqual(session.read(), [{ kind: 'launch', tabId: 1, entry: 'snowflake-account:example/production' }]);
   const second = sessionBridge(h, session).bridge;
   assert.deepEqual(await routeToTab(entry, second.learning, h.api), { result: 'focused' });
   assert.equal(h.tabs.length, 1);
-  clearTimeout(second.timer);
 });
 
-test('forgetting learned links waits for queued session writes and cannot restore a cleared alias', async context => {
-  const pending = timers(context);
+test('forgetting learned links waits for queued session writes and cannot restore a cleared alias', async () => {
   const h = browser([{ url: 'https://example.test/live' }]);
   const session = learningSession();
   let release;
@@ -166,7 +156,7 @@ test('forgetting learned links waits for queued session writes and cannot restor
     await session.save(records);
   } }).bridge;
   first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
-  const saving = settleBridge(first, pending);
+  const saving = settleBridge(first);
   await new Promise(setImmediate);
   assert.equal(typeof release, 'function');
   first.saveLearning = records => session.save(records);
@@ -177,7 +167,6 @@ test('forgetting learned links waits for queued session writes and cannot restor
   assert.deepEqual(session.read(), []);
   const second = sessionBridge(h, session).bridge;
   assert.deepEqual(await routeToTab('https://example.test/short', second.learning, h.api), { result: 'opened' });
-  clearTimeout(second.timer);
 });
 
 test('restoring a session reapplies privacy and storage limits', () => {
@@ -202,39 +191,37 @@ test('restoring during a pending navigation retains the committed page only unti
   assert.equal(learning.records.size, 0);
 });
 
-test('cache write failures are reported and retried on the next change', async context => {
-  const pending = timers(context);
+test('cache write failures are reported and retried on the next change', async () => {
   const h = browser([{ url: 'https://example.test/live' }]);
   const session = learningSession();
   const { bridge } = sessionBridge(h, session, { saveLearning: async () => { throw new Error('Storage unavailable.'); } });
   bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
-  await assert.rejects(settleBridge(bridge, pending), /Storage unavailable/);
+  await assert.rejects(settleBridge(bridge), /Storage unavailable/);
   const status = await bridge.status();
   assert.match(status.lastError, /Could not save learned links/);
   bridge.saveLearning = records => session.save(records);
   bridge.changed();
-  await settleBridge(bridge, pending);
+  await settleBridge(bridge);
   assert.equal((await bridge.status()).lastError, '');
   assert.equal(session.read().length, 1);
 });
 
-test('unchanged tab activity does not rewrite session learning', async context => {
-  const pending = timers(context);
+test('unchanged tab activity does not rewrite session learning', async () => {
   const h = browser([{ url: 'https://example.test/live' }]);
   const session = learningSession();
   let writes = 0;
   const { bridge } = sessionBridge(h, session, { saveLearning: async records => { writes++; await session.save(records); } });
   bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
-  await settleBridge(bridge, pending);
+  await settleBridge(bridge);
   for (const state of [{ frozen: true }, { frozen: false, discarded: true, status: 'unloaded' }]) {
     Object.assign(h.tabs[0], state);
     bridge.changed();
-    await settleBridge(bridge, pending);
+    await settleBridge(bridge);
   }
   assert.equal(writes, 1);
   h.tabs.length = 0;
   bridge.changed();
-  await settleBridge(bridge, pending);
+  await settleBridge(bridge);
   assert.equal(writes, 2);
   assert.deepEqual(session.read(), []);
 });
@@ -291,7 +278,8 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     assert.deepEqual(queries, chromium ? manifest.content_scripts.map(({ matches }) => ({ url: matches, discarded: false })) : []);
     assert.deepEqual(injected, chromium ? manifest.content_scripts.map(script =>
       ({ target: { tabId: 7, allFrames: script.all_frames === true }, files: script.js, injectImmediately: true })) : []);
-    chrome.tabs.query = h.api.tabs.query;
+    let tabQueries = 0;
+    chrome.tabs.query = (...args) => { tabQueries++; return h.api.tabs.query(...args); };
     chrome.tabs.onUpdated.emit(1, { discarded: true, status: 'unloaded' });
     chrome.runtime.onStartup.emit();
     chrome.webNavigation.onCommitted.emit({ frameId: 0, tabId: 1, url: h.tabs[0].url, documentId: 'early' });
@@ -301,7 +289,6 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     if (mode === 'safari') chrome.runtime.getManifest = () => ({ version: '3.2.5' });
     release({ learning: [{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }] });
     await new Promise(setImmediate);
-    for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
     await new Promise(setImmediate);
     const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short', deadline: Date.now() + 10_000 };
     if (safari) safari.emit(request); else port.emit(request);
@@ -317,19 +304,19 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     h.tabs.length = 0;
     chrome.tabs.onRemoved.emit(1);
     await new Promise(setImmediate);
-    for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); }
     await new Promise(setImmediate);
     assert.deepEqual(saved.learning, []);
-    const maintenanceScheduled = () => [...pending.values()].filter(timer => timer.delay === 50).length;
+    // Sleeping, waking and starting a load run no pass; a finished load does.
+    const passes = tabQueries;
     chrome.tabs.onActivated.emit({ tabId: 1 });
     chrome.tabs.onUpdated.emit(1, { discarded: true });
     chrome.tabs.onUpdated.emit(1, { frozen: true });
     chrome.tabs.onUpdated.emit(1, { status: 'loading' });
     await new Promise(setImmediate);
-    assert.equal(maintenanceScheduled(), 0);
+    assert.equal(tabQueries, passes);
     chrome.tabs.onUpdated.emit(1, { status: 'complete' });
     await new Promise(setImmediate);
-    assert.equal(maintenanceScheduled(), 1);
+    assert.equal(tabQueries, passes + 1);
   } finally {
     globalThis.WebSocket = previousSocket;
     if (previousChrome === undefined) delete globalThis.chrome;
@@ -348,11 +335,9 @@ test('repeated opens of the selected visible tab complete without redundant acti
   const h = browser([{ url: photo, active: true }]);
   h.api.tabs.update = h.api.windows.update = () => { throw new Error('Redundant activation'); };
   const { bridge } = sessionBridge(h, learningSession());
-  clearTimeout(bridge.timer);
   for (let i = 0; i < 3; i++) assert.deepEqual(await bridge.open(place), { result: 'focused' });
   assert.deepEqual(h.calls, []);
   assert.equal(h.tabs.length, 1);
-  clearTimeout(bridge.timer);
 });
 
 test('tab lookup runs while window lookup is pending and a known focused window skips the fallback query', async () => {
@@ -459,7 +444,6 @@ test('an external request that expires behind another open is rejected at the mu
   let release;
   h.api.windows.getAll = () => new Promise(resolve => { release = resolve; });
   const { bridge } = sessionBridge(h, learningSession());
-  clearTimeout(bridge.timer);
   const first = bridge.open('https://example.test/first');
   await new Promise(setImmediate);
   h.api.windows.getAll = original;
@@ -469,7 +453,6 @@ test('an external request that expires behind another open is rejected at the mu
   assert.deepEqual(await first, { result: 'opened' });
   await expired;
   assert.equal(h.tabs.length, 1);
-  clearTimeout(bridge.timer);
 });
 
 test('place identity rules reject another place, conflicting identities and lookalike URLs', async () => {
@@ -610,8 +593,7 @@ test('Slack hint extraction rejects other endpoints, malformed data and sensitiv
 });
 
 test('window recency ignores delayed older focus observations and discards closed windows', () => {
-  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {} });
-  clearTimeout(bridge.timer);
+  const bridge = new WindowsBridge(policy, { connectPort: nativePort, queryTabs: async () => [], badge() {} });
   bridge.focused(1, 30);
   bridge.focused(2, 20);
   bridge.focused(1, 10);
@@ -758,7 +740,6 @@ test('the extension reconnects automatically after an installed helper is replac
   const ports = [];
   const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
     connectPort: () => { const port = nativePort(); ports.push(port); return port; } });
-  clearTimeout(bridge.timer);
   await bridge.connect();
   ports[0].disconnect();
   assert.equal(bridge.connected, false);
@@ -778,7 +759,6 @@ test('a missing helper has four bounded reconnect attempts without permanent pol
   let connections = 0;
   const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
     connectPort: () => { connections++; return nativePort(null); } });
-  clearTimeout(bridge.timer);
   await assert.rejects(bridge.connect());
   for (const delay of [5000, 10000, 20000, 20000]) {
     assert.equal(pending.size, 1);
@@ -803,7 +783,6 @@ test('Safari recovery starts immediately without resetting its retry budget on l
       ports.push(port);
       return port;
     } });
-  clearTimeout(bridge.timer);
   await bridge.connect();
   for (const delay of [0, 5000, 10000, 20000]) {
     ports.at(-1).disconnect();
@@ -823,7 +802,6 @@ test('a newer installed helper requests a reload before routing another link', a
   const reloaded = [];
   const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {}, connectPort: () => port,
     extensionVersion: '3.1.2', reload: async version => { reloaded.push(version); } });
-  clearTimeout(bridge.timer);
   await assert.rejects(bridge.connect(), /Loading the updated extension/);
   assert.deepEqual(reloaded, ['3.1.3']);
   port.emit({ type: 'open', id: 'during-reload', url: 'https://example.test/' });
@@ -835,7 +813,6 @@ test('a reload failure is reported without disconnecting into a reload loop', as
   const port = nativePort({ type: 'ready', extensionVersion: '3.1.3' });
   const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {}, connectPort: () => port,
     extensionVersion: '3.1.2', reload: async () => { throw new Error('Load the installed current/extension folder.'); } });
-  clearTimeout(bridge.timer);
   await assert.rejects(bridge.connect());
   await new Promise(setImmediate);
   assert.equal(bridge.lastError, 'Load the installed current/extension folder.');
@@ -850,7 +827,6 @@ test('two simultaneous external requests create one tab and then reuse it', asyn
   const port = { onMessage: { addListener(fn) { listeners.push(fn); } }, onDisconnect: { addListener() {} },
     postMessage(message) { sent.push(message); if (message.type === 'hello') queueMicrotask(() => listeners.forEach(fn => fn({ type: 'ready' }))); }, disconnect() {} };
   const bridge = new WindowsBridge(policy, { connectPort: () => port, queryTabs: h.api.tabs.query, badge() {}, resetLearning() {}, browserAPI: h.api });
-  clearTimeout(bridge.timer);
   await bridge.connect();
   for (const id of ['one', 'two']) listeners.forEach(fn => fn({ type: 'open', id, url: 'https://example.test/new' }));
   await bridge.serial;
@@ -862,11 +838,9 @@ test('a background webpage click moves an unloaded match next to its source with
   const h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/other' },
     { url: 'https://example.test/item', active: false, status: 'unloaded', discarded: true }]);
   const { bridge } = sessionBridge(h, learningSession());
-  clearTimeout(bridge.timer);
   assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: 1, active: false }), { result: 'moved' });
   assert.deepEqual(h.calls, [['move', 3, { windowId: 1, index: 1 }]]);
   assert.equal(h.tabs.length, 3);
-  clearTimeout(bridge.timer);
 });
 
 test('a background match already beside its source, left of it, in another window or pinned is placed without focus', async () => {
@@ -881,10 +855,8 @@ test('a background match already beside its source, left of it, in another windo
     const h = browser(tabs, windows);
     const source = h.tabs.find(tab => tab.url.endsWith('/source'));
     const { bridge } = sessionBridge(h, learningSession());
-    clearTimeout(bridge.timer);
     assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: source.id, active: false }), { result: 'moved' });
     assert.deepEqual(h.calls, calls);
-    clearTimeout(bridge.timer);
   }
 });
 
@@ -892,10 +864,8 @@ test('a background match that cannot be moved is focused instead of doing nothin
   const h = browser([{ url: 'https://example.test/source', active: true }, { url: 'https://example.test/x' }, { url: 'https://example.test/item' }]);
   h.api.tabs.move = async () => { throw new Error('Unsupported'); };
   const { bridge } = sessionBridge(h, learningSession());
-  clearTimeout(bridge.timer);
   assert.deepEqual(await bridge.open('https://example.test/item', { sourceTabId: 1, active: false }), { result: 'focused' });
   assert.deepEqual(h.calls, [['focus', 3, { active: true }]]);
-  clearTimeout(bridge.timer);
 });
 
 test('an unmatched webpage click opens next to its source and preserves background intent', async () => {
@@ -903,25 +873,20 @@ test('an unmatched webpage click opens next to its source and preserves backgrou
     { id: 1, focused: true, state: 'normal' }, { id: 2, focused: false, state: 'normal' },
   ]);
   const { bridge } = sessionBridge(h, learningSession());
-  clearTimeout(bridge.timer);
   assert.deepEqual(await bridge.open('https://example.test/new', { sourceTabId: 1, active: false }), { result: 'opened' });
   assert.deepEqual(h.calls, [['create', { windowId: 2, url: 'https://example.test/new', active: false, index: 6 }]]);
-  clearTimeout(bridge.timer);
 });
 
 test('an unmatched ordinary blank-target link opens a foreground tab in its source window', async () => {
   const h = browser([{ url: 'https://example.test/source', index: 3 }]);
   const { bridge } = sessionBridge(h, learningSession());
-  clearTimeout(bridge.timer);
   assert.deepEqual(await bridge.open('https://example.test/new', { sourceTabId: 1, active: true }), { result: 'opened' });
   assert.deepEqual(h.calls, [['create', { windowId: 1, url: 'https://example.test/new', active: true, index: 4 }]]);
-  clearTimeout(bridge.timer);
 });
 
 test('webpage clicks and external opens share one queue and cannot simultaneously create duplicates', async () => {
   const h = browser([{ url: 'https://example.test/source' }]);
   const { bridge, port } = sessionBridge(h, learningSession());
-  clearTimeout(bridge.timer);
   await bridge.connect();
   const clicked = bridge.open('https://example.test/new', { sourceTabId: 1, active: false });
   port.emit({ type: 'open', id: 'external', url: 'https://example.test/new' });
@@ -929,77 +894,117 @@ test('webpage clicks and external opens share one queue and cannot simultaneousl
   await bridge.serial;
   assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
   assert.equal(port.sent.find(message => message.id === 'external').result, 'focused');
-  clearTimeout(bridge.timer);
 });
 
-test('a slow browser never has more than one tab-maintenance query in flight, plus one catch-up pass', async context => {
-  const pending = timers(context);
+test('a change starts a pass at once, and a slow browser never has more than one query in flight plus one catch-up', async () => {
   const h = browser([{ url: 'https://example.test/item' }]);
   const queries = [];
   const { bridge } = sessionBridge(h, learningSession(), { queryTabs: () => new Promise(resolve => queries.push(resolve)) });
-  const fire = () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } };
-  fire();
-  for (let i = 0; i < 5; i++) { bridge.changed(); fire(); }
+  // No timer: the pass starts once the current task is done, so changes made together share it.
+  for (let i = 0; i < 5; i++) bridge.changed();
+  await new Promise(setImmediate);
   assert.equal(queries.length, 1);
+  for (let i = 0; i < 5; i++) bridge.changed();
   queries[0](h.tabs.map(tab => ({ ...tab })));
   await new Promise(setImmediate);
-  fire();
   assert.equal(queries.length, 2);
   queries[1](h.tabs.map(tab => ({ ...tab })));
   await new Promise(setImmediate);
-  fire();
   assert.equal(queries.length, 2);
 });
 
-test('a maintenance pass messages only the pages whose keys changed, and a loading page gets them from that pass', async context => {
-  const pending = timers(context);
+test('a pass whose tab list predates a learned change queries again instead of pruning it', async () => {
+  const h = browser([]);
+  const queries = [];
+  const session = learningSession();
+  const { bridge } = sessionBridge(h, session, { queryTabs: () => new Promise(resolve => queries.push(resolve)) });
+  await new Promise(setImmediate);
+  // A link opens a tab and is learned while the pass waits for its (now stale, empty) tab list.
+  bridge.learning.rememberLaunch(1, { entry: 'snowflake-account:example/production' });
+  h.tabs.push({ id: 1, windowId: 1, status: 'complete', url: 'https://example-production.snowflakecomputing.com/console/login#/' });
+  queries[0]([]);
+  await new Promise(setImmediate);
+  assert.equal(queries.length, 2);
+  queries[1](h.tabs.map(tab => ({ ...tab })));
+  await new Promise(setImmediate);
+  await bridge.saving;
+  assert.deepEqual(session.read(), [{ kind: 'launch', tabId: 1, entry: 'snowflake-account:example/production' }]);
+});
+
+test('pages get their full list once, then only what changed, and only when something did', async () => {
   const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }, { url: 'https://other.test/c' },
     { url: 'https://example.test/d', discarded: true }]);
   const messages = [];
-  h.api.tabs.sendMessage = async (id, message, options) => { messages.push([id, message.keys, options]); };
+  h.api.tabs.sendMessage = async (id, message, options) => { messages.push([id, message, options]); };
   let queries = 0;
   const { bridge } = sessionBridge(h, learningSession(), { queryTabs: async () => { queries++; return h.tabs.map(tab => ({ ...tab })); } });
-  const fire = async () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } await new Promise(setImmediate); await bridge.saving; };
-  await fire();
-  // Each page gets the other tabs' keys on every site; the sleeping tab is listed but never contacted.
-  const keysOf = id => messages.filter(([tab]) => tab === id).map(([, keys]) => keys);
-  const [a, b, c, d] = ['https://example.test/a', 'https://example.test/b', 'https://other.test/c', 'https://example.test/d'];
-  assert.deepEqual(keysOf(1), [prints(b, c, d)]);
-  assert.deepEqual(keysOf(2), [prints(a, c, d)]);
-  assert.deepEqual(keysOf(3), [prints(a, b, d)]);
-  assert.deepEqual(keysOf(4), []);
-  assert.ok(messages.every(([, , options]) => options.frameId === 0));
-  // Nothing changed for any page: no messages, however many passes.
+  const settle = async () => { await new Promise(setImmediate); await bridge.saving; };
+  const sorted = keys => [...keys].sort((left, right) => left - right);
+  const [a, b, c, d, short] = ['https://example.test/a', 'https://example.test/b', 'https://other.test/c', 'https://example.test/d',
+    'https://example.test/short'];
+  await settle();
+  // A started background sends each open page its full list once, on every site; the sleeping tab is never contacted.
+  const first = messages[0][1].version;
+  assert.deepEqual(messages.map(([id, message]) => [id, sorted(message.keys)]), [[1, prints(b, c, d)], [2, prints(a, c, d)], [3, prints(a, b, d)]]);
+  assert.ok(messages.every(([, message, options]) => options.frameId === 0 && message.version === first && message.rules.identityRules));
+  // Nothing changed: no messages, however many passes.
   messages.length = 0;
-  for (let i = 0; i < 3; i++) { bridge.changed(); await fire(); }
+  for (let i = 0; i < 3; i++) { bridge.changed(); await settle(); }
   assert.deepEqual(messages, []);
-  // A learned link to b reaches every page but b's own.
-  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: b }]);
-  await fire();
-  assert.deepEqual(messages.map(([id]) => id), [1, 3]);
-  assert.ok(messages.every(([, keys]) => keys.includes(fingerprint('https://example.test/short'))));
-  // A page that loads is answered from the last pass without another tab query, and is not messaged again unchanged.
+  // A learned link to b: the pages that list it get just that key, as a change to the list they hold.
+  bridge.observe([{ kind: 'redirect', source: short, destination: b }]);
+  await settle();
+  const changes = () => messages.map(([id, message]) => [id, message.base, message.version, message.added, message.removed]);
+  assert.deepEqual(changes(), [[1, first, first + 1, prints(short), []], [3, first, first + 1, prints(short), []]]);
+  // b navigates: the other pages lose b and the short link and gain e; b's own list (the others) doesn't change.
+  messages.length = 0;
+  h.tabs[1].url = 'https://example.test/e';
+  bridge.changed(); await settle();
+  assert.deepEqual(changes().map(([id, base, version, added, removed]) => [id, base, version, added, sorted(removed)]),
+    [[1, first + 1, first + 2, prints('https://example.test/e'), prints(b, short)], [3, first + 1, first + 2, prints('https://example.test/e'), prints(b, short)]]);
+  // A page that loads asks for its full list: answered from the last pass, without another tab query.
+  messages.length = 0;
   const before = queries;
-  assert.deepEqual(await bridge.keysFor({ id: 3, url: c }), prints(a, b, d, 'https://example.test/short'));
+  await bridge.requestKeys({ id: 3, url: c });
   assert.equal(queries, before);
-  messages.length = 0;
-  bridge.changed(); await fire();
-  assert.deepEqual(messages, []);
+  assert.deepEqual(messages.map(([id, message]) => [id, sorted(message.keys), message.version]),
+    [[3, prints(a, d, 'https://example.test/e'), first + 2]]);
 });
 
-test('a page whose script is unreachable is retried on the next pass instead of being marked as sent', async context => {
-  const pending = timers(context);
+test('a page that can\'t be reached gets no more changes until it asks for its full list', async () => {
   const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }]);
   let reachable = false;
   const messages = [];
-  h.api.tabs.sendMessage = async id => { if (!reachable) throw new Error('Receiving end does not exist.'); messages.push(id); };
+  h.api.tabs.sendMessage = async (id, message) => { if (!reachable) throw new Error('Receiving end does not exist.'); messages.push([id, message]); };
   const { bridge } = sessionBridge(h, learningSession());
-  const fire = async () => { for (const [id, timer] of [...pending]) if (timer.delay === 50) { pending.delete(id); timer.fn(); } await new Promise(setImmediate); await new Promise(setImmediate); };
-  await fire();
+  const settle = async () => { await new Promise(setImmediate); await new Promise(setImmediate); };
+  await settle();
   assert.equal(bridge.sentKeys.size, 0);
   reachable = true;
-  bridge.changed(); await fire();
-  assert.deepEqual(messages, [1, 2]);
+  bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/b' }]);
+  await settle();
+  assert.deepEqual(messages, []);
+  await bridge.requestKeys({ id: 1, url: 'https://example.test/a' });
+  await new Promise(setImmediate);
+  assert.deepEqual(messages.map(([id, message]) => [id, message.keys.length]), [[1, 2]]);
+});
+
+test('a started background sends every open page its full list on its first pass, even after answering one page', async () => {
+  const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }]);
+  const messages = [];
+  h.api.tabs.sendMessage = async (id, message) => { messages.push([id, Array.isArray(message.keys)]); };
+  const queries = [];
+  const { bridge } = sessionBridge(h, learningSession(), { queryTabs: () => new Promise(resolve => queries.push(resolve)) });
+  await new Promise(setImmediate);
+  // A page asks while the first pass waits for its tabs, and is answered first.
+  const asking = bridge.requestKeys({ id: 2, url: 'https://example.test/b' });
+  queries[1](h.tabs.map(tab => ({ ...tab })));
+  await asking;
+  await new Promise(setImmediate);
+  // Pages loaded before the restart hold lists this background never sent, so asking pages alone can't bring them up to date.
+  queries[0](h.tabs.map(tab => ({ ...tab })));
+  await new Promise(setImmediate);
+  assert.deepEqual(messages, [[2, true], [1, true], [2, true]]);
 });
 
 test('rapid repeat clicks reuse a just-created tab that Safari still lists without an address', async () => {
