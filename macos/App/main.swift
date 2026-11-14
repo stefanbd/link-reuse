@@ -1,5 +1,4 @@
 import AppKit
-import SafariServices
 
 /// The link router: receives links from other apps and hands each one to the browser's extension, one at a time.
 @MainActor
@@ -65,14 +64,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // needed) before the request. When it is already in front, skip the activation round trip.
             if running(browser)?.isActive != true { try await show(browser) }
             if safari == nil { safari = try await SafariBridge(version: resources.extensionVersion) }
-            // Not connected yet: a disabled extension would never take the link, so say so rather than wait.
-            if await safari?.connected != true {
-                let state = try await SFSafariExtensionManager.stateOfSafariExtension(
-                    withIdentifier: SafariBridge.extensionIdentifier)
-                guard state.isEnabled else {
-                    throw failure("Link Reuse isn’t enabled in Safari. Turn it on in Safari Settings → Extensions.")
-                }
-            }
             _ = try await safari?.open(url)
         } else {
             var sessions = try MacBridge.sessions(browser: browser.bundleID)
@@ -180,9 +171,8 @@ if arguments.contains("--install") {
 }
 if arguments.contains("--safari-status") {
     runCommand {
-        let id = SafariBridge.extensionIdentifier
-        let state = try await SFSafariExtensionManager.stateOfSafariExtension(withIdentifier: id)
-        print(state.isEnabled ? "Safari extension is enabled." : "Safari extension is installed but not enabled.")
+        let enabled = try await SafariBridge.extensionEnabled()
+        print(enabled ? "Safari extension is enabled." : "Safari extension is installed but not enabled.")
     }
 }
 

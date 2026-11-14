@@ -43,7 +43,12 @@ struct SafariBridgeTests {
 
     static func main() async throws {
         let deliveries = SafariDelivery()
-        let bridge = try await SafariBridge(version: "3.2.4") { await deliveries.send($0) }
+        // Safari's answer about the extension comes only after the first link is done: a link never waits for it.
+        let (asked, answer) = AsyncStream<Never>.makeStream()
+        let bridge = try await SafariBridge(version: "3.2.4") { await deliveries.send($0) } enabled: {
+            for await _ in asked {}
+            return true
+        }
         let opening = Task { try await bridge.open("https://example.test/item") }
         let descriptor = await deliveries.next()
         precondition(descriptor.type == "connect" && descriptor.url == nil && descriptor.id == nil)
@@ -67,6 +72,7 @@ struct SafariBridgeTests {
         try await send(BridgeMessage(type: "result", id: first.id, result: "focused"), to: socket)
         let initialResult = try await opening.value
         precondition(initialResult == "focused")
+        answer.finish()
 
         try await socket.ping(Data([1]))
         let pong = try await socket.receive()
@@ -170,7 +176,16 @@ struct SafariBridgeTests {
         do { _ = try await quitting.value; preconditionFailure("A link outlived Safari") }
         catch let error as POSIXError { precondition(error.code == .ECANCELED) }
         await crowded.stop()
+
+        // A disabled extension never connects: its link ends with the reason instead of waiting.
+        let disabled = try await SafariBridge(version: "3.2.4") { _ in } enabled: { false }
+        do {
+            _ = try await disabled.open("https://example.test/disabled")
+            preconditionFailure("A disabled extension took a link")
+        }
+        catch { precondition(error.localizedDescription.contains("isn’t enabled in Safari")) }
+        await disabled.stop()
         print("Safari loopback-only WebSocket, token authentication, one-time bootstrap, warm reuse, disconnect handling, " +
-              "room for the extension, app replacement and Safari quitting passed")
+              "room for the extension, app replacement, Safari quitting and a disabled extension passed")
     }
 }

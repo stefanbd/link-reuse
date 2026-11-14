@@ -36,7 +36,7 @@ setTimeout(() => process.exit(1), 20000).unref();
         defer { if process.isRunning { process.terminate() } }
         let bridge = try await SafariBridge(version: "3.2.4") { message in
             try input.fileHandleForWriting.write(contentsOf: JSONEncoder().encode(message) + Data([10]))
-        }
+        } enabled: { true }
         for index in 0..<4 {
             if index > 0 { try await Task.sleep(for: .seconds(2)) }
             let result = try await bridge.open("https://example.test/item")

@@ -20,6 +20,7 @@ actor SafariBridge {
     private let key = SymmetricKey(size: .bits256)
     private let version: String
     private let wake: @Sendable (BridgeMessage) async throws -> Void
+    private let enabled: @Sendable () async throws -> Bool
     private var endpoint = ""
     private var serving: Task<Void, Never>?
     private var clients: [String: Client] = [:]
@@ -32,10 +33,12 @@ actor SafariBridge {
 
     init(
         version: String,
-        wake: @escaping @Sendable (BridgeMessage) async throws -> Void = SafariBridge.dispatch
+        wake: @escaping @Sendable (BridgeMessage) async throws -> Void = SafariBridge.dispatch,
+        enabled: @escaping @Sendable () async throws -> Bool = SafariBridge.extensionEnabled
     ) async throws {
         self.version = version
         self.wake = wake
+        self.enabled = enabled
         let parameters = NWParametersBuilder.parameters {
             WebSocket { TCP().noDelay(true) }.maximumMessageSize(1_048_576).autoReplyPing(true)
         }
@@ -118,6 +121,12 @@ actor SafariBridge {
             }
         } else {
             try await extensionReady()
+            // A disabled extension never connects, so its link ends here instead of waiting. Safari takes about a
+            // second to answer, so the question follows the wake: the link is on its way meanwhile.
+            guard try await enabled() else {
+                throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    "Link Reuse isn’t enabled in Safari. Turn it on in Safari Settings → Extensions."])
+            }
         }
     }
 
@@ -244,6 +253,10 @@ actor SafariBridge {
         let data = try JSONEncoder().encode(message)
         guard let text = String(data: data, encoding: .utf8) else { throw POSIXError(.EINVAL) }
         try await connection.send(text)
+    }
+
+    static func extensionEnabled() async throws -> Bool {
+        try await SFSafariExtensionManager.stateOfSafariExtension(withIdentifier: extensionIdentifier).isEnabled
     }
 
     @MainActor private static func dispatch(_ message: BridgeMessage) async throws {
