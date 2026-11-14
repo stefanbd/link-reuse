@@ -6,7 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let resources: AppResources
     private var pending: [OpenRequest] = []
     private var processing = false
-    private var safari: SafariBridge?
+    /// The connection to Safari's extension, made once.
+    private var safari: Task<SafariBridge, any Error>?
     private var termination: (any DispatchSourceSignal)?
     /// A browser being started for a link, and the wait for its extension to connect.
     private var starting: (bundleID: String, wait: Task<[BridgeSession], Error>)?
@@ -14,12 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(resources: AppResources) { self.resources = resources }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(safariReady(_:)), name: BridgeMessage.safariReady, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(applicationTerminated(_:)),
             name: NSWorkspace.didTerminateApplicationNotification, object: nil)
-        termination = onTermination { await self.safari?.replaced() }
+        termination = onTermination { try? await self.safari?.value.replaced() }
         terminateIfUnused()
     }
 
@@ -29,15 +28,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let safari, let browser = resources.browsers.first(where: { $0.bundleID == app?.bundleIdentifier }),
            browser.profilePath == nil {
             let quit = failure("\(browser.name) quit before Link Reuse could open the link.")
-            Task { await safari.end(quit) }
+            Task { try? await safari.value.end(quit) }
         }
         if resources.browsers.contains(where: { $0.bundleID == app?.bundleIdentifier }) { terminateIfUnused() }
     }
 
-    /// The Safari extension (re)started: reconnect now rather than on the next link.
-    @objc private func safariReady(_ notification: Notification) {
-        guard let safari else { return }
-        Task { try? await safari.extensionReady() }
+    private func safariBridge() async throws -> SafariBridge {
+        let making = safari ?? Task { try await SafariBridge(version: resources.extensionVersion) }
+        safari = making
+        do { return try await making.value }
+        catch {
+            if safari == making { safari = nil }
+            throw error
+        }
     }
 
     private func running(_ browser: BrowserConfiguration) -> NSRunningApplication? {
@@ -63,8 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Safari's extension stalls while Safari is in the background, so bring it forward (launching it if
             // needed) before the request. When it is already in front, skip the activation round trip.
             if running(browser)?.isActive != true { try await show(browser) }
-            if safari == nil { safari = try await SafariBridge(version: resources.extensionVersion) }
-            _ = try await safari?.open(url)
+            _ = try await safariBridge().open(url)
         } else {
             var sessions = try MacBridge.sessions(browser: browser.bundleID)
             if sessions.isEmpty {
@@ -94,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        // Safari's extension (re)started: connect to it now, so no link waits for Safari to pass the connection on.
+        if urls.contains(BridgeMessage.safariStarted) { Task { try? await safariBridge().extensionReady() } }
         pending.append(contentsOf: urls.compactMap { OpenRequest($0, browsers: resources.browsers) })
         guard !processing else { return }
         processing = true

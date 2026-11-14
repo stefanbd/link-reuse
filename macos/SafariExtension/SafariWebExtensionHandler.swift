@@ -1,3 +1,4 @@
+import AppKit
 import SafariServices
 import OSLog
 
@@ -12,21 +13,30 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             context.cancelRequest(withError: CocoaError(.coderInvalidValue))
             return
         }
-        let response = NSExtensionItem()
         if message["type"] as? String == "diagnostic", let reason = message["result"] as? String,
            BridgeMessage.diagnosticReasons.contains(reason),
            let rawCode = message["error"] as? String, let code = Int(rawCode), (0...4999).contains(code) {
             log.notice("Safari browser ended: \(reason, privacy: .public) \(code)")
-            response.userInfo = [SFExtensionMessageKey: ["type": "receipt"]]
+            context.completeRequest(returningItems: [Self.receipt()])
         } else if message["type"] as? String == "hello" {
             log.notice("Safari startup version: \(version, privacy: .public)")
-            response.userInfo = [SFExtensionMessageKey: ["type": "receipt"]]
-            DistributedNotificationCenter.default()
-                .postNotificationName(BridgeMessage.safariReady, object: nil, userInfo: nil, deliverImmediately: true)
+            // Opening the app's address starts it if it isn't running, so it is connected before the first link. The
+            // request ends once the address is handed over, so this process can't end before it is.
+            let quiet = NSWorkspace.OpenConfiguration()
+            quiet.activates = false
+            quiet.addsToRecentItems = false
+            nonisolated(unsafe) let context = context
+            NSWorkspace.shared.open(BridgeMessage.safariStarted, configuration: quiet) { _, _ in
+                context.completeRequest(returningItems: [Self.receipt()])
+            }
         } else {
             context.cancelRequest(withError: CocoaError(.coderInvalidValue))
-            return
         }
-        context.completeRequest(returningItems: [response])
+    }
+
+    private static func receipt() -> NSExtensionItem {
+        let item = NSExtensionItem()
+        item.userInfo = [SFExtensionMessageKey: ["type": "receipt"]]
+        return item
     }
 }

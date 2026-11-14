@@ -1,7 +1,8 @@
 import Foundation
 
 struct BridgeMessage: Codable, Sendable {
-    static let safariReady = Notification.Name("me.dichev.LinkReuse.Safari.ready")
+    /// Safari's extension opens this address when it starts: the app starts if it isn't running, and connects.
+    static let safariStarted = URL(string: "linkreuse://started/safari")!
     /// URL-free webpage-link events the Safari extension may log; anything else is rejected.
     static let traceEvents: Set<String> = ["page-focused", "page-moved", "page-opened", "page-failed",
         "page-skip-disabled", "page-skip-prevented", "page-skip-other",

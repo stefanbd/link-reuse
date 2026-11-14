@@ -114,9 +114,11 @@ order across reloads.
   was interrupted is never replayed once it may have created a tab.
 - The Safari channel allows 16 clients and 1 MiB per message. When it is full, the oldest connection that hasn't
   authenticated makes room, so idle connections can't keep the extension out.
-- The Mac app is background-only and starts on demand, with no login item or service. It brings Safari forward before
-  handing over a link, because Safari's extension calls stall while Safari is in the background. It stays running while
-  a supported browser is open.
+- The Mac app is background-only and starts on demand, with no login item or service. It stays running while a supported
+  browser is open. Safari's extension starts it: when the extension starts, it opens the app's
+  `linkreuse://started/safari` address, and the app connects then. Safari takes over a second to pass on the first
+  connection, so this way that wait is over before the first link. The app brings Safari forward before handing over a
+  link, because Safari's extension calls stall while Safari is in the background.
 - Connection metadata holds process identity and activity time only. Logs never contain URLs, tokens or page content.
 
 ## When something fails
