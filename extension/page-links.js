@@ -5,7 +5,8 @@
   const topFrame = window.top === window;
   // False once an extension update orphans this script; clicks are then left to the browser.
   let enabled = true;
-  // Fingerprints of the other tabs' match keys, kept current by the extension, and the rules to compute a link's keys.
+  // Fingerprints of the other tabs' match keys, kept current by the extension while this page shows, and the rules to
+  // compute a link's keys.
   let reuseKeys = new Set();
   let rules = null;
 
@@ -98,23 +99,19 @@
   window.addEventListener('auxclick', onClick, true);
 
   if (!topFrame) return;
-  // The extension sends the full list when the page asks, then only what changed. Each change names the list it
-  // applies to, so a page that missed one (or was restored from the back/forward cache) asks again.
-  let version;
+  // The page asks for its list whenever it is shown, and the extension sends each new one while it shows. A hidden page
+  // gets nothing, so the browser can let it sleep.
   function askForKeys() {
+    if (document.visibilityState !== 'visible') return;
     try { void chrome.runtime.sendMessage({ type: 'page-keys' }).catch(() => {}); } catch { enabled = false; }
   }
   chrome.runtime.onMessage.addListener(message => {
-    if (message?.type !== 'page-keys') return;
-    if (Array.isArray(message.keys)) {
-      reuseKeys = new Set(message.keys);
-      rules = message.rules;
-    } else if (message.base === version && Array.isArray(message.added) && Array.isArray(message.removed)) {
-      for (const key of message.added) reuseKeys.add(key);
-      for (const key of message.removed) reuseKeys.delete(key);
-    } else return askForKeys();
-    version = message.version;
+    if (message?.type !== 'page-keys' || !Array.isArray(message.keys)) return;
+    reuseKeys = new Set(message.keys);
+    rules = message.rules;
   });
+  document.addEventListener('visibilitychange', askForKeys);
+  // A page restored from the back/forward cache shows again with the list it left with.
   window.addEventListener('pageshow', event => { if (event.persisted) askForKeys(); });
   askForKeys();
 })();

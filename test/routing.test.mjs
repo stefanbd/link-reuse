@@ -902,68 +902,64 @@ test('a pass whose tab list predates a learned change queries again instead of p
   assert.deepEqual(session.read(), [{ kind: 'launch', tabId: 1, entry: 'snowflake-account:example/production' }]);
 });
 
-test('pages get their full list once, then only what changed, and only when something did', async () => {
-  const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }, { url: 'https://other.test/c' },
-    { url: 'https://example.test/d', discarded: true }]);
+test('only pages that are showing get their lists, and only when their list changed', async () => {
+  const [a, b, c, d, e, short] = ['https://example.test/a', 'https://example.test/b', 'https://other.test/c', 'https://example.test/d',
+    'https://example.test/e', 'https://example.test/short'];
+  const h = browser([{ url: a, active: true }, { url: b }, { url: c, windowId: 2, active: true }, { url: d, discarded: true }]);
   const messages = [];
   h.api.tabs.sendMessage = async (id, message, options) => { messages.push([id, message, options]); };
   let queries = 0;
   const { bridge } = sessionBridge(h, learningSession(), { queryTabs: async () => { queries++; return h.tabs.map(tab => ({ ...tab })); } });
   const settle = async () => { await new Promise(setImmediate); await bridge.saving; };
-  const sorted = keys => [...keys].sort((left, right) => left - right);
-  const [a, b, c, d, short] = ['https://example.test/a', 'https://example.test/b', 'https://other.test/c', 'https://example.test/d',
-    'https://example.test/short'];
+  const lists = () => messages.map(([id, message]) => [id, [...message.keys].sort((left, right) => left - right)]);
   await settle();
-  // A started background sends each open page its full list once, on every site; the sleeping tab is never contacted.
-  const first = messages[0][1].version;
-  assert.deepEqual(messages.map(([id, message]) => [id, sorted(message.keys)]), [[1, prints(b, c, d)], [2, prints(a, c, d)], [3, prints(a, b, d)]]);
-  assert.ok(messages.every(([, message, options]) => options.frameId === 0 && message.version === first && message.rules.identityRules));
+  // A started background sends each showing page its list, on every site; hidden and sleeping tabs are never contacted.
+  assert.deepEqual(lists(), [[1, prints(b, c, d)], [3, prints(a, b, d)]]);
+  assert.ok(messages.every(([, message, options]) => options.frameId === 0 && message.rules.identityRules));
   // Nothing changed: no messages, however many passes.
   messages.length = 0;
   for (let i = 0; i < 3; i++) { bridge.changed(); await settle(); }
   assert.deepEqual(messages, []);
-  // A learned link to b: the pages that list it get just that key, as a change to the list they hold.
+  // A learned link to b: the showing pages get their new lists.
   bridge.observe([{ kind: 'redirect', source: short, destination: b }]);
   await settle();
-  const changes = () => messages.map(([id, message]) => [id, message.base, message.version, message.added, message.removed]);
-  assert.deepEqual(changes(), [[1, first, first + 1, prints(short), []], [3, first, first + 1, prints(short), []]]);
-  // b navigates: the other pages lose b and the short link and gain e; b's own list (the others) doesn't change.
+  assert.deepEqual(lists(), [[1, prints(b, c, d, short)], [3, prints(a, b, d, short)]]);
+  // The showing page a navigates: the other showing page's list changes; its own (the others) doesn't.
   messages.length = 0;
-  h.tabs[1].url = 'https://example.test/e';
+  h.tabs[0].url = e;
   bridge.changed(); await settle();
-  assert.deepEqual(changes().map(([id, base, version, added, removed]) => [id, base, version, added, sorted(removed)]),
-    [[1, first + 1, first + 2, prints('https://example.test/e'), prints(b, short)], [3, first + 1, first + 2, prints('https://example.test/e'), prints(b, short)]]);
-  // A page that loads asks for its full list: answered from the last pass, without another tab query.
+  assert.deepEqual(lists(), [[3, prints(b, d, e, short)]]);
+  // The hidden page b is shown and asks for its list: answered from the last pass, without another tab query.
   messages.length = 0;
   const before = queries;
-  await bridge.requestKeys({ id: 3, url: c });
+  await bridge.requestKeys({ id: 2, url: b });
+  await settle();
   assert.equal(queries, before);
-  assert.deepEqual(messages.map(([id, message]) => [id, sorted(message.keys), message.version]),
-    [[3, prints(a, d, 'https://example.test/e'), first + 2]]);
+  assert.deepEqual(lists(), [[2, prints(c, d, e)]]);
 });
 
-test('a page that can\'t be reached gets no more changes until it asks for its full list', async () => {
-  const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }]);
+test('a page that can\'t be reached doesn\'t stop the pass, and gets its list when it asks', async () => {
+  const h = browser([{ url: 'https://example.test/a', active: true }, { url: 'https://example.test/b' }]);
   let reachable = false;
   const messages = [];
   h.api.tabs.sendMessage = async (id, message) => { if (!reachable) throw new Error('Receiving end does not exist.'); messages.push([id, message]); };
   const { bridge } = sessionBridge(h, learningSession());
   const settle = async () => { await new Promise(setImmediate); await new Promise(setImmediate); };
   await settle();
-  assert.equal(bridge.sentKeys.size, 0);
-  reachable = true;
   bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/b' }]);
   await settle();
   assert.deepEqual(messages, []);
+  reachable = true;
   await bridge.requestKeys({ id: 1, url: 'https://example.test/a' });
-  await new Promise(setImmediate);
+  await settle();
   assert.deepEqual(messages.map(([id, message]) => [id, message.keys.length]), [[1, 2]]);
 });
 
-test('a started background sends every open page its full list on its first pass, even after answering one page', async () => {
-  const h = browser([{ url: 'https://example.test/a' }, { url: 'https://example.test/b' }]);
+test('a started background sends every showing page its list on its first pass, even after answering one page', async () => {
+  const h = browser([{ url: 'https://example.test/a', active: true }, { url: 'https://example.test/b', windowId: 2, active: true },
+    { url: 'https://example.test/c' }]);
   const messages = [];
-  h.api.tabs.sendMessage = async (id, message) => { messages.push([id, Array.isArray(message.keys)]); };
+  h.api.tabs.sendMessage = async id => { messages.push(id); };
   const queries = [];
   const { bridge } = sessionBridge(h, learningSession(), { queryTabs: () => new Promise(resolve => queries.push(resolve)) });
   await new Promise(setImmediate);
@@ -975,7 +971,7 @@ test('a started background sends every open page its full list on its first pass
   // Pages loaded before the restart hold lists this background never sent, so asking pages alone can't bring them up to date.
   queries[0](h.tabs.map(tab => ({ ...tab })));
   await new Promise(setImmediate);
-  assert.deepEqual(messages, [[2, true], [1, true], [2, true]]);
+  assert.deepEqual(messages, [2, 1, 2]);
 });
 
 test('rapid repeat clicks reuse a just-created tab that Safari still lists without an address', async () => {

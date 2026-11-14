@@ -82,12 +82,12 @@ scripts can act:
   background.
 - **Ordinary same-tab links** use match keys held by each top-level page: 53-bit fingerprints of the other tabs' keys,
   on every site (`extension/page-keys.mjs`). A page can check a link it has but can't read which pages are open. A page
-  gets its full list when it loads, then only the fingerprints that enter or leave it. Each change names the version
-  it applies to, so a page that missed one (or comes back from the back/forward cache) asks for its full list again. A
-  restarted background sends every page its full list once. The page decides at the click itself, before the page or
-  its router sees it. Other links send no message and add no delay. A link to the page you're on stays there. The
-  background confirms the match before switching, so a fingerprint collision or a tab that has gone just loads the link
-  normally.
+  asks for its list whenever it is shown: when it loads in front, when its tab is selected or its window uncovered, and
+  when it comes back from the back/forward cache. While it shows, the background sends it each new list. A hidden page
+  gets nothing, so the browser can let it sleep. A restarted background sends every showing page its list once. The page
+  decides at the click itself, before the page or its router sees it. Other links send no message and add no delay. A
+  link to the page you're on stays there. The background confirms the match before switching, so a fingerprint collision
+  or a tab that has gone just loads the link normally.
 - Right-click menus, downloads, Shift- and Alt-clicks, synthetic clicks and plain clicks inside frames keep the
   browser's behaviour.
 

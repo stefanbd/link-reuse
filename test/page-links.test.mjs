@@ -10,7 +10,7 @@ const settle = () => new Promise(setImmediate);
 
 // keys: the match keys of other tabs, which the extension sends the page as fingerprints when it asks. here: its address.
 function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], baseTarget, broken = false, framed = false,
-  here = 'https://example.test/here' } = {}) {
+  hidden = false, here = 'https://example.test/here' } = {}) {
   const listeners = new Map(), sent = [], notices = [], skips = [], assigned = [], requests = [];
   let messageListener;
   const node = () => ({ style: {}, setAttribute() {}, addEventListener() {}, append() {}, remove() {} });
@@ -18,6 +18,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
     querySelector: () => baseTarget ? { getAttribute: () => baseTarget } : null,
     getElementById: id => notices.find(value => value.id === id), createElement: node,
     documentElement: { append: value => notices.push(value) },
+    visibilityState: hidden ? 'hidden' : 'visible', addEventListener(type, fn) { listeners.set(type, fn); },
   };
   const runtime = {
     onMessage: { addListener(fn) { messageListener = fn; } },
@@ -48,12 +49,11 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
     listeners.get(event.type)(event);
     return event;
   };
-  // The extension sending the full list, or a change to the list at version base.
-  let version = 0;
-  function push(value) { messageListener?.({ type: 'page-keys', version: ++version, keys: prints(value), rules: policy }); }
-  const change = (added, removed, base = version) =>
-    messageListener?.({ type: 'page-keys', base, version: ++version, added: prints(added), removed: prints(removed) });
-  return { click, push, change, sent, notices, skips, assigned, requests, listeners };
+  // The extension sending the page its list.
+  function push(value) { messageListener?.({ type: 'page-keys', keys: prints(value), rules: policy }); }
+  // The page being shown or hidden: a tab switch, or its window being covered or uncovered.
+  const show = visible => { document.visibilityState = visible ? 'visible' : 'hidden'; listeners.get('visibilitychange')(); };
+  return { click, push, show, sent, notices, skips, assigned, requests, listeners };
 }
 
 test('new-tab webpage gestures cancel the default before requesting one shared route', async () => {
@@ -216,23 +216,24 @@ test('before the keys arrive, a plain link is left alone; pushed keys take effec
   assert.equal(h.sent.length, 1);
 });
 
-test('the page applies changes only to the list it holds, and asks for its full list after missing one', async () => {
-  const h = harness();
+test('a page asks for its list when it loads showing and whenever it is shown again, never while hidden', async () => {
+  assert.equal(harness().requests.length, 1);
+  const h = harness({ hidden: true, keys: ['https://example.test/item'] });
   await settle();
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.click().cancelled, undefined);
+  h.show(true);
   assert.equal(h.requests.length, 1);
-  h.change(['https://example.test/item'], []);
-  assert.equal(h.click().cancelled, true);
-  h.change([], ['https://example.test/item']);
-  assert.equal(h.click().cancelled, undefined);
-  // A change to a list this page doesn't hold is ignored, and the page asks again; the full list replaces its own.
-  h.change(['https://example.test/item'], [], 99);
-  assert.equal(h.click().cancelled, undefined);
-  assert.equal(h.requests.length, 2);
   await settle();
-  h.change(['https://example.test/item'], []);
   assert.equal(h.click().cancelled, true);
-  // Restored from the back/forward cache, it may have missed changes: it asks again. A normal show doesn't.
+  h.show(false);
+  assert.equal(h.requests.length, 1);
+  // Restored from the back/forward cache it asks again, once it shows; a normal show doesn't.
+  h.listeners.get('pageshow')({ persisted: true });
+  assert.equal(h.requests.length, 1);
+  h.show(true);
   h.listeners.get('pageshow')({ persisted: false });
+  assert.equal(h.requests.length, 2);
   h.listeners.get('pageshow')({ persisted: true });
   assert.equal(h.requests.length, 3);
 });

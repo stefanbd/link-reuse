@@ -43,24 +43,10 @@ export function pageKeys(index, tab) {
   return [...index.keys()].filter(key => listed(index, key, tab.id));
 }
 
-/** The keys whose tabs differ between two indexes: the only ones that can enter or leave a page's list. */
-export function changedKeys(previous, index) {
-  const changed = [...previous.keys()].filter(key => !index.has(key));
-  for (const [key, ids] of index) {
-    const before = previous.get(key);
-    if (before?.size !== ids.size || [...ids].some(id => !before.has(id))) changed.push(key);
-  }
-  return changed;
-}
-
-/** How one page's list changes between two indexes. */
-export function pageChanges(changed, previous, index, tab) {
-  const added = [], removed = [];
-  for (const key of changed) {
-    const now = listed(index, key, tab.id);
-    if (now !== listed(previous, key, tab.id)) (now ? added : removed).push(key);
-  }
-  return { added, removed };
+/** Whether a page's list differs between two indexes. */
+export function listChanged(previous, index, tab) {
+  const differs = key => listed(previous, key, tab.id) !== listed(index, key, tab.id);
+  return [...previous.keys()].some(differs) || [...index.keys()].some(differs);
 }
 
 /** What a page needs to compute a link's keys itself: the URL rules, without the learning limits. */

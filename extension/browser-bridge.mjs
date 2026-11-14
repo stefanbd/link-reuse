@@ -1,11 +1,11 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
-import { reuseIndex, pageKeys, changedKeys, pageChanges, pageRules } from './page-keys.mjs';
+import { reuseIndex, pageKeys, listChanged, pageRules } from './page-keys.mjs';
 
 const maxPending = 16;
 
 /**
  * The extension's background: it routes links from the native app and from pages, keeps learning current, and gives
- * each page the keys it needs to decide plain link clicks.
+ * each page that is showing the keys it needs to decide plain link clicks.
  */
 export class BrowserBridge {
   constructor(policy, {
@@ -20,8 +20,6 @@ export class BrowserBridge {
     this.learning.restore(learningState);
     this.saving = Promise.resolve();
     this.windowFocusOrder = new Map();
-    this.sentKeys = new Map(); // the version of the list each page holds
-    this.keysVersion = 0;
     this.pagesKnown = false;
     this.lastError = '';
     this.serial = Promise.resolve();
@@ -67,33 +65,21 @@ export class BrowserBridge {
   }
 
   /**
-   * Keeps each page's list of other tabs' keys current, so it can decide a plain link click at the click. A page gets
-   * its full list when it asks; after that only what changed, and only when something did.
+   * Sends each page that is showing its list of other tabs' keys when that list changes, so it can decide a plain link
+   * click at the click. A hidden page is left asleep: it asks when it is shown.
    */
   publish(tabs) {
     const previous = this.pageIndex;
     const index = this.pageIndex = reuseIndex(tabs, this.learning);
-    const live = new Set(tabs.map(tab => tab.id));
-    for (const id of this.sentKeys.keys()) if (!live.has(id)) this.sentKeys.delete(id);
-    // A started background doesn't know what open pages hold, so its first pass sends each one its full list.
-    const changed = this.pagesKnown ? changedKeys(previous, index) : null;
+    // A started background doesn't know what open pages hold, so its first pass sends each showing one its list.
+    const known = this.pagesKnown;
     this.pagesKnown = true;
-    if (changed?.length === 0) return;
-    this.keysVersion++;
     for (const tab of tabs) {
-      if (tab.discarded) continue;
-      const base = this.sentKeys.get(tab.id);
-      if (!changed) this.sendKeys(tab);
-      else if (base !== undefined) {
-        const { added, removed } = pageChanges(changed, previous, index, tab);
-        if (added.length || removed.length) {
-          this.deliver(tab.id, { type: 'page-keys', base, version: this.keysVersion, added, removed });
-        }
-      }
+      if (tab.active && !tab.discarded && (!known || listChanged(previous, index, tab))) this.sendKeys(tab);
     }
   }
 
-  /** A page asking for its full list: when it loads, or when it missed a change. */
+  /** A page asking for its list: when it loads or is shown again. */
   async requestKeys(tab) {
     if (!this.pageIndex) {
       const tabs = await this.queryTabs();
@@ -102,19 +88,14 @@ export class BrowserBridge {
     this.sendKeys(tab);
   }
 
+  /** Every list reaches a page by this one channel, in order. A page that can't be reached asks when it is shown. */
   sendKeys(tab) {
     const keys = pageKeys(this.pageIndex, tab);
-    if (keys) {
-      this.deliver(tab.id, { type: 'page-keys', version: this.keysVersion, keys, rules: pageRules(this.policy) });
-    }
-  }
-
-  /** Every list reaches a page by this one channel, in order. A page that can't be reached asks when it loads. */
-  deliver(tabId, message) {
-    this.sentKeys.set(tabId, message.version);
+    if (!keys) return;
+    const message = { type: 'page-keys', keys, rules: pageRules(this.policy) };
     void Promise.resolve()
-      .then(() => this.browserAPI.tabs.sendMessage(tabId, message, { frameId: 0 }))
-      .catch(() => { if (this.sentKeys.get(tabId) === message.version) this.sentKeys.delete(tabId); });
+      .then(() => this.browserAPI.tabs.sendMessage(tab.id, message, { frameId: 0 }))
+      .catch(() => {});
   }
 
   /** The user acts: connects the native app if it isn't connected. */
