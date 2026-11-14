@@ -51,6 +51,7 @@ def prepare():
             'LSMinimumSystemVersion': '26.0',
         }
         if name == 'app':
+            info['CFBundleIconFile'] = info['CFBundleIconName'] = 'AppIcon'
             info['LSBackgroundOnly'] = True
             info['CFBundleURLTypes'] = [
                 {'CFBundleURLName': 'Link Reuse request', 'CFBundleTypeRole': 'Viewer', 'CFBundleURLSchemes': ['linkreuse']}]
@@ -74,6 +75,9 @@ def main():
     parser.add_argument('--sign', default='-', help='Code-signing identity; defaults to ad-hoc development signing.')
     args = parser.parse_args()
     extension_id = prepare()
+    subprocess.run(['xcrun', 'actool', str(ROOT / 'macos/AppIcon.icon'), '--compile', str(BUILD / 'app-resources'),
+                    '--app-icon', 'AppIcon', '--platform', 'macosx', '--minimum-deployment-target', '26.0',
+                    '--output-partial-info-plist', '/dev/null'], check=True, stdout=subprocess.DEVNULL)
     # Xcode registers every app it builds, and a second registered Safari extension makes PlugInKit kill the live one.
     # Undo that registration here; the `.noindex` products folder keeps Spotlight from registering it again.
     if APP.exists(): unregister(APP)

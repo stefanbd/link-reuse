@@ -4,6 +4,7 @@ import json
 import pathlib
 import sys
 import plistlib
+import struct
 import tempfile
 import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'macos'))
@@ -29,6 +30,11 @@ class PackagingTests(unittest.TestCase):
                     if source.is_file() and source.name != 'manifest.json':
                         self.assertEqual((chromium / source.name).read_bytes(), source.read_bytes())
                         self.assertEqual((safari / source.name).read_bytes(), source.read_bytes())
+                for size, path in original['icons'].items():
+                    for folder in [chromium, safari]:
+                        header = (folder / path).read_bytes()[:24]
+                        self.assertEqual(header[:8], b'\x89PNG\r\n\x1a\n')
+                        self.assertEqual(struct.unpack('>II', header[16:]), (int(size), int(size)))
                 self.assertEqual(manifests[0]['permissions'], original['permissions'])
                 self.assertEqual(manifests[0]['host_permissions'], original['host_permissions'])
                 self.assertEqual(manifests[1]['permissions'], original['permissions'] + original['host_permissions'])
@@ -41,6 +47,7 @@ class PackagingTests(unittest.TestCase):
                 self.assertTrue(manifests[1]['background']['persistent'])
                 infos = [plistlib.loads((build.BUILD / (name + '-info.plist')).read_bytes()) for name in ['app', 'safari']]
                 self.assertTrue(infos[0]['LSBackgroundOnly'])
+                self.assertEqual(infos[0]['CFBundleIconName'], 'AppIcon')
                 self.assertNotIn('LSUIElement', infos[0])
                 self.assertEqual(infos[0]['CFBundleShortVersionString'], infos[1]['CFBundleShortVersionString'])
                 for info in infos:

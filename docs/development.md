@@ -9,6 +9,8 @@
 | `macos/SafariExtension/` | The Safari extension's native handler |
 | `macos/build.py`, `macos/install.py` | Build the universal app; install it into `~/Applications` |
 | `macos/browsers.json` | Browsers the Mac app can route to |
+| `macos/AppIcon.icon` | The Mac app's icon, an Icon Composer document. `build.py` compiles it into the app. |
+| `macos/icons.py` | Draws the extension's and the Windows app's icons from the Mac icon |
 | `macos/openin/` | Optional OpenIn router setup |
 | `windows/` | The Windows app (.NET Native AOT) and its packaging |
 | `bucket/` | The Scoop manifest; scoop reads it from this path, and the release workflow writes it |
@@ -67,6 +69,20 @@ python windows/package.py build/windows-native/LinkReuse.exe
 ```
 
 `package.py` writes the ZIP, its SHA-256 and the Scoop manifest.
+
+## Icon
+
+The icon is a chain in a circle. `macos/AppIcon.icon` is its source: open it in Icon Composer (it comes with Xcode),
+or edit `icon.json` and the two drawings in `Assets/`. macOS draws the app icon from it, in each appearance.
+
+The extension and the Windows app use the same chain, cut out of a green disc. After changing the Mac icon, draw them
+again and commit the result:
+
+```sh
+python3 macos/icons.py   # needs rsvg-convert: brew install librsvg
+```
+
+It writes the sizes listed under `icons` in `extension/manifest.json`, and `windows/LinkReuse/LinkReuse.ico`.
 
 ## Versions and releases
 
