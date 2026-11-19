@@ -46,12 +46,6 @@ def swap_contents(left, right):
         raise OSError(code, os.strerror(code))
 
 
-# What ends each part of a replaced version: the router and the browser hosts hand over to the new version on SIGUSR1;
-# Safari's handler just ends, so Safari starts the new one.
-EXECUTABLES = {'Contents/MacOS/LinkReuse': signal.SIGUSR1, 'Contents/Helpers/LinkReuseHost': signal.SIGUSR1,
-               'Contents/PlugIns/LinkReuseSafari.appex/Contents/MacOS/LinkReuseSafari': signal.SIGTERM}
-
-
 def executable(pid):
     """The path of the file a process runs. macOS resolves it from the file itself, so it follows a rename."""
     proc_pidpath = ctypes.CDLL(None, use_errno=True).proc_pidpath
@@ -63,8 +57,11 @@ def executable(pid):
 
 def old_processes(contents):
     """This user's processes still running the replaced version, which now lies at `contents`, with their signals.
-    Whatever started since the swap runs the new version, so it is not among them."""
-    signals = {os.path.realpath(contents.parent / path): value for path, value in EXECUTABLES.items()}
+    Whatever started since the swap runs the new version, so it is not among them. The router and the browser hosts hand
+    over to the new version on SIGUSR1; Safari's handler just ends, so Safari starts the new one."""
+    signals = {os.path.realpath(contents.parent / path): value for path, value in [
+        ('Contents/MacOS/LinkReuse', signal.SIGUSR1), ('Contents/Helpers/LinkReuseHost', signal.SIGUSR1),
+        ('Contents/PlugIns/LinkReuseSafari.appex/Contents/MacOS/LinkReuseSafari', signal.SIGTERM)]}
     found = {}
     for line in subprocess.check_output(['ps', '-axo', 'pid=,uid='], text=True).splitlines():
         pid, uid = map(int, line.split())
