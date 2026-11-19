@@ -2,7 +2,8 @@ name: Windows package
 on:
   workflow_dispatch:
   push:
-    paths: ['windows/**', 'extension/**', 'test/**', '.github/workflows/windows.yml']
+    # The packaging test imports macos/build.py, which imports macos/install.py.
+    paths: ['windows/**', 'extension/**', 'test/**', 'macos/build.py', 'macos/install.py', '.github/workflows/windows.yml']
 permissions:
   contents: read
 jobs:
