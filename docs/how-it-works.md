@@ -115,7 +115,7 @@ order across reloads.
 | Browser | Connection |
 | --- | --- |
 | Chromium on macOS | A native messaging host (a copy of the app's binary) per browser profile, reached over private Unix sockets in `/tmp/link-reuse-<uid>` (directory 0700, files 0600). The app uses only hosts running the installed host file, checked by file identity and process start time. |
-| Chromium on Windows | A native messaging host copied to `%LOCALAPPDATA%\Link Reuse\host\<app version>`, reached over current-user named pipes. The app uses only hosts running this version's copy. |
+| Chromium on Windows | A native messaging host copied to `%LOCALAPPDATA%\Link Reuse\host\<app version>`, reached over current-user named pipes. Links go only to hosts running the copy the latest install registered, as on the Mac, so a link waiting while an update lands reaches the new host. |
 | Safari | One WebSocket to the app on `127.0.0.1`, on a random port. The app announces it through Safari's extension messaging with a per-launch HMAC token, and the extension must authenticate before it receives any request. |
 
 - Safari runs the extension with a resident Manifest V2 background page, because native messages cannot reliably wake

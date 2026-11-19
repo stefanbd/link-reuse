@@ -149,9 +149,12 @@ internal sealed class NativeHost
         clients.Release();
     }
 
-    /// The browser's connected profiles. Routing uses only this version's helpers (`current`); an installer stops the rest.
+    /// The browser's connected profiles. Routing uses only helpers running the registered one (`current`), as on the Mac:
+    /// a link that waits while an update lands reaches the new version's helper, and one an update left behind gets none.
+    /// An installer stops the rest.
     internal static IEnumerable<Session> LiveSessions(string browser, bool current = true)
     {
+        var host = current ? Registration.RegisteredHost(browser) : null;
         if (!Directory.Exists(Registration.Sessions)) yield break;
         foreach (var file in Directory.EnumerateFiles(Registration.Sessions, "linkreuse-*.json"))
         {
@@ -164,7 +167,7 @@ internal sealed class NativeHost
                     !Guid.TryParseExact(session.Pipe[10..], "N", out _)) continue;
                 using var process = Process.GetProcessById(session.ProcessId);
                 if (process.StartTime.ToUniversalTime().Ticks != session.Started || process.ProcessName != "LinkReuse" ||
-                    current && !string.Equals(process.MainModule?.FileName, Registration.HostExe, StringComparison.OrdinalIgnoreCase)) session = null;
+                    host is not null && !string.Equals(process.MainModule?.FileName, host, StringComparison.OrdinalIgnoreCase)) session = null;
             }
             catch (Exception error) when (error is IOException or JsonException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { session = null; }
             if (session is not null) yield return session;

@@ -17,7 +17,6 @@ internal static class Registration
     internal static string ExtensionManifest => Path.Combine(Home, "extension", "manifest.json");
     /// This app's version: each version's helper is staged in its own folder.
     internal static string Version => typeof(Registration).Assembly.GetName().Version!.ToString(3);
-    internal static string HostExe => Path.Combine(Root, "host", Version, "LinkReuse.exe");
     internal static string ExtensionVersion()
     {
         using var manifest = JsonDocument.Parse(File.ReadAllText(ExtensionManifest));
@@ -32,6 +31,20 @@ internal static class Registration
         var hash = SHA256.HashData(Convert.FromBase64String(manifest.RootElement.GetProperty("key").GetString()!));
         var id = string.Concat(Convert.ToHexString(hash)[..32].ToLowerInvariant().Select(character => (char)('a' + Convert.ToInt32(character.ToString(), 16))));
         return $"chrome-extension://{id}/";
+    }
+
+    /// The helper the browser starts: the one the latest install registered for it.
+    internal static string RegisteredHost(string browser)
+    {
+        try
+        {
+            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(Root, browser + "-host.json")));
+            return manifest.RootElement.GetProperty("path").GetString() ?? throw new InvalidDataException();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            throw new InvalidOperationException($"{browser} can't start Link Reuse: it isn't registered there. Run link-reuse --install, then open the link again.");
+        }
     }
 
     internal static string Browser(string? requested = null)
