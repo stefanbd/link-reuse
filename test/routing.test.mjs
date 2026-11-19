@@ -121,12 +121,33 @@ test('restored learning is pruned against current tabs before it can match', asy
   const first = sessionBridge(h, session).bridge;
   first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
   await settleBridge(first);
-  for (const tabs of [[], [{ id: 1, url: 'https://example.test/elsewhere', status: 'complete' }],
+  for (const tabs of [[{ id: 1, url: 'https://example.test/elsewhere', status: 'complete' }],
     [{ id: 1, url: 'https://example.test/live', discarded: true, status: 'unloaded', incognito: true }]]) {
     const current = browser(tabs);
     const restarted = sessionBridge(current, session).bridge;
     assert.deepEqual(await routeToTab('https://example.test/short', restarted.learning, current.api), { result: 'opened' });
     assert.equal(restarted.learning.records.size, 0);
+  }
+});
+
+test('learning restored before the browser has restored its windows waits for them', async () => {
+  const h = browser([{ url: 'https://example.test/live' }]);
+  const session = learningSession();
+  const first = sessionBridge(h, session).bridge;
+  first.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
+  await settleBridge(first);
+  for (const [restored, kept] of [['https://example.test/live', 1], ['https://example.test/elsewhere', 0]]) {
+    const starting = browser([]);
+    const restarted = sessionBridge(starting, session).bridge;
+    await settleBridge(restarted);
+    assert.equal(restarted.learning.records.size, 1);
+    assert.equal(session.read().length, 1);
+    starting.tabs.push({ id: 1, index: 0, windowId: 1, status: 'unloaded', discarded: true, incognito: false, url: restored });
+    restarted.changed();
+    await settleBridge(restarted);
+    assert.equal(restarted.learning.records.size, kept);
+    assert.equal(session.read().length, kept);
+    if (kept) assert.deepEqual(await routeToTab('https://example.test/short', restarted.learning, starting.api), { result: 'focused' });
   }
 });
 

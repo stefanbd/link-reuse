@@ -24,7 +24,7 @@ async function start() {
   const bridge = new BrowserBridge(policy, {
     platform: platform.os,
     connectPort,
-    queryTabs: () => permittedTabs(chrome),
+    queryTabs: () => permittedTabs(chrome, { windowType: 'normal' }),
     learningState: saved.learning,
     saveLearning: learning => chrome.storage.local.set({ learning }),
     resetLearning: () => { observer.tabs.clear(); observer.pending.clear(); },

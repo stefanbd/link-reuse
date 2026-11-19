@@ -50,9 +50,11 @@ Three formats need more than a regular expression and live in `extension/url-rul
 - **Canonical addresses:** one `rel=canonical`, or `og:url` when there is none. Only same-origin declarations that pass
   conservative checks are accepted.
 
-Learning is stored in the browser profile's local extension storage, up to 4,096 records and 2 MiB. A record is
-dropped once no open tab needs it, and restored records are checked against open tabs before use. Sign-in and
-authentication pages, addresses carrying tokens and private windows are never learned. Nothing is synced.
+Learning is stored in the browser profile's local extension storage, up to 4,096 records and 2 MiB, so it survives
+browser restarts and updates. A record is dropped once no tab in a normal window needs it. Restored records are checked
+against open tabs before use, once the browser lists tabs: a starting browser starts its extensions before it restores
+its windows, and then restores them all at once. Sign-in and authentication pages, addresses carrying tokens and private
+windows are never learned. Nothing is synced.
 
 Safari reports a cross-site navigation that moves to another web process as failed before it commits, so the observer
 keeps a failed navigation's start until the tab's next start or commit. Chromium reports a start before every commit,

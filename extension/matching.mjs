@@ -157,8 +157,12 @@ export class LiveLearning {
     }
   }
 
-  /** Drops records no open tab needs any more. */
+  /**
+   * Drops records no open tab needs any more. A starting browser starts its extensions before it restores its windows,
+   * and restores them all at once, so records restored from storage wait for a tab list with tabs in it.
+   */
   prune(tabs) {
+    if (this.restoredUnchecked && !tabs.length) return;
     this.restoredUnchecked = false;
     const live = new Set();
     const byId = new Map(tabs.map(tab => [tab.id, tab]));
