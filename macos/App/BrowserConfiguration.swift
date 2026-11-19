@@ -64,20 +64,31 @@ struct AppResources {
         extensionVersion = try JSONDecoder().decode(Manifest.self, from: manifest).version
     }
 
-    func installNativeMessaging() throws {
+    /// The native messaging registration that lets the extension start this app's host.
+    private var hostManifest: [String: Any] {
+        ["name": "me.dichev.link_reuse", "description": "Route links through the shared Link Reuse extension.",
+         "path": Self.hostURL.path, "type": "stdio", "allowed_origins": [extensionOrigin]]
+    }
+
+    private static func hostManifestFile(_ profilePath: String, in applicationSupport: URL) -> URL {
+        applicationSupport.appending(path: profilePath).appending(path: "NativeMessagingHosts/me.dichev.link_reuse.json")
+    }
+
+    func installNativeMessaging(applicationSupport: URL = .applicationSupportDirectory) throws {
         for browser in browsers {
             guard let profilePath = browser.profilePath else { continue }
-            let folder = URL.applicationSupportDirectory.appending(path: profilePath)
-                .appending(path: "NativeMessagingHosts")
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let file = folder.appending(path: "me.dichev.link_reuse.json")
-            let manifest: [String: Any] = [
-                "name": "me.dichev.link_reuse", "description": "Route links through the shared Link Reuse extension.",
-                "path": Self.hostURL.path, "type": "stdio", "allowed_origins": [extensionOrigin],
-            ]
-            try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
-                .write(to: file, options: .atomic)
+            let file = Self.hostManifestFile(profilePath, in: applicationSupport)
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: hostManifest, options: [.sortedKeys]).write(to: file, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         }
+    }
+
+    /// Whether this Chromium browser can start this app's host: without it, its extension can never connect.
+    func registered(in browser: BrowserConfiguration, applicationSupport: URL = .applicationSupportDirectory) -> Bool {
+        guard let profilePath = browser.profilePath,
+              let data = try? Data(contentsOf: Self.hostManifestFile(profilePath, in: applicationSupport)),
+              let manifest = try? JSONSerialization.jsonObject(with: data) as? NSDictionary else { return false }
+        return manifest == hostManifest as NSDictionary
     }
 }

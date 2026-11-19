@@ -65,23 +65,31 @@ jobs:
           extension=$(jq -r .version extension/manifest.json)
           tag="windows-v$version"
           if gh release view "$tag" >/dev/null 2>&1; then
-            if git diff --quiet "$tag" HEAD -- $shipped; then echo "$tag is already published and nothing it ships has changed."; exit 0; fi
-            echo "::error::Shipped files ($shipped) changed since $tag. Bump <Version> in windows/LinkReuse/LinkReuse.csproj to publish it."
-            exit 1
+            if ! git diff --quiet "$tag" HEAD -- $shipped; then
+              echo "::error::Shipped files ($shipped) changed since $tag. Bump <Version> in windows/LinkReuse/LinkReuse.csproj to publish it."
+              exit 1
+            fi
+            echo "$tag is already published; making sure the bucket lists it."
+          else
+            previous=$(git tag --list 'windows-v*' --sort=-v:refname | head -n 1)
+            if [ -n "$previous" ] && ! git diff --quiet "$previous" HEAD -- extension &&
+               [ "$(git show "$previous:extension/manifest.json" | jq -r .version)" = "$extension" ]; then
+              echo "::error::extension/ changed since $previous but its version is still $extension. Bump extension/manifest.json so browsers reload it."
+              exit 1
+            fi
+            gh release create "$tag" build/windows/* --target "$GITHUB_SHA" --title "Windows $version — shared extension $extension" --notes \
+              "Bundles shared extension $extension and the native Windows $version app, built from $GITHUB_SHA after the shared JavaScript tests, packaging checks and native self-test passed. Update with \`scoop update link-reuse\`."
           fi
-          previous=$(git tag --list 'windows-v*' --sort=-v:refname | head -n 1)
-          if [ -n "$previous" ] && ! git diff --quiet "$previous" HEAD -- extension &&
-             [ "$(git show "$previous:extension/manifest.json" | jq -r .version)" = "$extension" ]; then
-            echo "::error::extension/ changed since $previous but its version is still $extension. Bump extension/manifest.json so browsers reload it."
-            exit 1
-          fi
-          gh release create "$tag" build/windows/* --target "$GITHUB_SHA" --title "Windows $version — shared extension $extension" --notes \
-            "Bundles shared extension $extension and the native Windows $version app, built from $GITHUB_SHA after the shared JavaScript tests, packaging checks and native self-test passed. Update with \`scoop update link-reuse\`."
-          cp build/windows/link-reuse.json bucket/link-reuse.json
+          # The bucket lists the release's own manifest, and only while main still ships this version: a newer one's
+          # release lists itself. A failed push leaves the release in place, and running the job again finishes it.
+          git fetch origin main
+          current=$(git show origin/main:windows/LinkReuse/LinkReuse.csproj | sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p')
+          if [ "$current" != "$version" ]; then echo "main now ships Windows $current; its release lists it."; exit 0; fi
+          git checkout --detach origin/main
+          gh release download "$tag" --pattern link-reuse.json --output bucket/link-reuse.json --clobber
+          git add bucket/link-reuse.json
+          if git diff --cached --quiet; then echo "The bucket already lists Windows $version."; exit 0; fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add bucket/link-reuse.json
-          git diff --cached --quiet || git commit -m "Publish the Scoop manifest for Windows $version"
-          git fetch origin main
-          git rebase origin/main
+          git commit -m "Publish the Scoop manifest for Windows $version"
           git push origin HEAD:main

@@ -9,7 +9,7 @@ struct BridgeMessage: Codable, Sendable {
         "page-skip-button", "page-skip-anchor", "page-skip-target"]
     /// Reasons the Safari extension may report when its connection ends; anything else is rejected.
     static let diagnosticReasons: Set<String> = [
-        "core", "version", "queue", "message", "socket-error", "socket-close", "unavailable", "bootstrap"]
+        "core", "version", "message", "socket-error", "socket-close", "unavailable", "bootstrap", "endpoint"]
     var type: String
     var id: String? = nil
     var url: String? = nil
@@ -19,4 +19,11 @@ struct BridgeMessage: Codable, Sendable {
     var profile: String? = nil
     var endpoint: String? = nil
     var token: String? = nil
+    /// In the extension's greeting: whether one of its profile's windows has focus.
+    var focused: Bool? = nil
+}
+
+/// An error whose description the user sees.
+func failure(_ message: String) -> NSError {
+    NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
 }

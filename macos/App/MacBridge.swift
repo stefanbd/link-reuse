@@ -56,22 +56,28 @@ enum MacBridge {
                   UUID(uuidString: session.id) != nil,
                   session.file.lastPathComponent == file.lastPathComponent,
                   session.browser == browser else { return nil }
-            var buffer = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
-            let count = proc_pidpath(session.pid, &buffer, UInt32(buffer.count))
-            let path = String(decoding: buffer.prefix(max(0, Int(count))).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            var actual = stat()
-            var expected = stat()
-            let alive = count > 0 && processStarted(session.pid) == session.started
-            guard alive, Darwin.lstat(path, &actual) == 0, Darwin.lstat(host.path, &expected) == 0,
-                  actual.st_dev == expected.st_dev, actual.st_ino == expected.st_ino else {
-                // A host left from a replaced version still holds its browser's connection, so that browser's extension
-                // couldn't connect to the installed host: end it (it tells its extension to connect to the new one).
-                if alive { kill(session.pid, SIGTERM) }
-                session.remove()
+            // A session whose process is gone is removed. A live one that isn't the installed host (a replaced version,
+            // which the installer ends) or can't be inspected is left alone. Signal 0 sends nothing: it asks whether
+            // the process exists.
+            guard let started = processStarted(session.pid) else {
+                if kill(session.pid, 0) != 0 && errno == ESRCH { session.remove() }
                 return nil
             }
-            return session
-        }.sorted { $0.activeAt > $1.activeAt }
+            guard started == session.started else { session.remove(); return nil }
+            return runs(session.pid, host) ? session : nil
+        }.sorted { $0.activeAt != $1.activeAt ? $0.activeAt > $1.activeAt : $0.started < $1.started }
+    }
+
+    /// Whether the process runs the executable at this path (the same file, not just the same name).
+    static func runs(_ pid: Int32, _ executable: URL) -> Bool {
+        var buffer = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
+        let count = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard count > 0 else { return false }
+        let path = String(decoding: buffer.prefix(Int(count)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        var actual = stat()
+        var expected = stat()
+        return Darwin.lstat(path, &actual) == 0 && Darwin.lstat(executable.path, &expected) == 0 &&
+            actual.st_dev == expected.st_dev && actual.st_ino == expected.st_ino
     }
 
     /// The browser's live sessions, waiting for its extension to connect if there are none yet. The wait follows changes
@@ -132,16 +138,16 @@ enum MacBridge {
         _ = setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    static func send(_ url: String, session: BridgeSession) throws -> String {
+    /// Passes a link to a browser's host. `pass` is asked right before the write: whether the link is still this app's.
+    static func send(_ url: String, session: BridgeSession, pass: () -> Bool = { true }) throws -> String {
         let socket = try descriptor(path: session.socket, listen: false)
         let stream = FileHandle(fileDescriptor: socket, closeOnDealloc: true)
         defer { try? stream.close() }
+        guard pass() else { throw CancellationError() }
         try Wire.writeFrame(JSONEncoder().encode(BridgeMessage(type: "open", url: url)), to: stream)
         guard let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EIO) }
         let reply = try JSONDecoder().decode(BridgeMessage.self, from: data)
-        if let error = reply.error {
-            throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
-        }
+        if let error = reply.error { throw failure(error) }
         guard reply.type == "result", let result = reply.result, ["focused", "opened"].contains(result) else {
             throw POSIXError(.EINVAL)
         }

@@ -15,6 +15,9 @@ internal static class Registration
     internal static string Exe => Environment.ProcessPath ?? throw new InvalidOperationException("Cannot locate Link Reuse.");
     internal static string Home => Path.GetDirectoryName(Exe)!;
     internal static string ExtensionManifest => Path.Combine(Home, "extension", "manifest.json");
+    /// This app's version: each version's helper is staged in its own folder.
+    internal static string Version => typeof(Registration).Assembly.GetName().Version!.ToString(3);
+    internal static string HostExe => Path.Combine(Root, "host", Version, "LinkReuse.exe");
     internal static string ExtensionVersion()
     {
         using var manifest = JsonDocument.Parse(File.ReadAllText(ExtensionManifest));
@@ -51,7 +54,7 @@ internal static class Registration
     {
         Directory.CreateDirectory(Root);
         var browser = Browser(requested);
-        var hostExe = StageHost(Home, Root);
+        var hostExe = StageHost(Home, Root, Version);
         File.WriteAllText(Path.Combine(Root, "settings.json"), JsonSerializer.Serialize(new Settings(browser), WireJson.Default.Settings));
         using (var key = Registry.CurrentUser.CreateSubKey(ProgId))
         {
@@ -94,11 +97,10 @@ internal static class Registration
         SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
     }
 
-    internal static string StageHost(string source, string root)
+    internal static string StageHost(string source, string root, string version)
     {
         var sourceManifest = Path.Combine(source, "extension", "manifest.json");
-        using var manifest = JsonDocument.Parse(File.ReadAllText(sourceManifest));
-        var home = Path.Combine(root, "host", manifest.RootElement.GetProperty("version").GetString()!);
+        var home = Path.Combine(root, "host", version);
         Directory.CreateDirectory(Path.Combine(home, "extension"));
         var executable = Path.Combine(home, "LinkReuse.exe");
         // Immutable version directories let an old host remain mapped while its replacement is staged.
@@ -144,7 +146,7 @@ internal static class Registration
     {
         // The hosts running now are the previous version's. Listed before any is stopped, because a browser reconnects at
         // once and its new host must keep running.
-        foreach (var session in Browsers.Known.Keys.SelectMany(NativeHost.LiveSessions).ToArray())
+        foreach (var session in Browsers.Known.Keys.SelectMany(browser => NativeHost.LiveSessions(browser, current: false)).ToArray())
         {
             try
             {

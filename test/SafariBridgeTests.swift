@@ -32,13 +32,24 @@ struct SafariBridgeTests {
         return try JSONDecoder().decode(BridgeMessage.self, from: value.content)
     }
 
-    static func connect(_ descriptor: BridgeMessage, origin: String = origin, token: String? = nil, profile: String = UUID().uuidString, version: String = "3.2.4") async throws -> NetworkConnection<WebSocket> {
+    static func connect(_ descriptor: BridgeMessage, origin: String = origin, token: String? = nil, profile: String = UUID().uuidString, version: String = "3.2.4", focused: Bool = true) async throws -> NetworkConnection<WebSocket> {
         guard let endpoint = descriptor.endpoint, let url = URL(string: endpoint) else { preconditionFailure() }
         let socket = NetworkConnection(to: .url(url)) {
             WebSocket { TCP() }.additionalHeaders([("Origin", origin)])
         }
-        try await send(BridgeMessage(type: "hello", result: "active", extensionVersion: version, profile: profile, token: token ?? descriptor.token), to: socket)
+        try await send(BridgeMessage(type: "hello", extensionVersion: version, profile: profile, token: token ?? descriptor.token, focused: focused), to: socket)
         return socket
+    }
+
+    /// A wake whose first call waits until the test fails it; later calls succeed.
+    actor Gate {
+        private var calls = 0
+        private var held: CheckedContinuation<Void, Error>?
+        func pass() async throws {
+            calls += 1
+            if calls == 1 { try await withCheckedThrowingContinuation { held = $0 } }
+        }
+        func fail() { held?.resume(throwing: POSIXError(.EIO)) }
     }
 
     static func main() async throws {
@@ -58,7 +69,8 @@ struct SafariBridgeTests {
         let outdated = try await connect(descriptor, version: "3.2.3")
         let update = try await receive(outdated)
         precondition(update.extensionVersion == "3.2.4")
-        try await bridge.extensionReady()
+        // Safari's extension (re)started: the address goes out again, whether or not a link waits.
+        await bridge.announce()
         let retriedBootstrap = await deliveries.next()
         precondition(retriedBootstrap.endpoint == descriptor.endpoint && retriedBootstrap.token == descriptor.token)
 
@@ -128,29 +140,83 @@ struct SafariBridgeTests {
         }
         await bridge.stop()
 
-        // A (re)started extension is connected right away instead of on the next link, and only once.
+        // A (re)started extension is connected right away instead of on the next link. Each start announces again, so a
+        // profile that starts later connects too.
         let idleDeliveries = SafariDelivery()
         let idle = try await SafariBridge(version: "3.2.4") { await idleDeliveries.send($0) }
-        try await idle.extensionReady()
+        await idle.announce()
         let idleDescriptor = await idleDeliveries.next()
         precondition(idleDescriptor.type == "connect" && idleDescriptor.endpoint != nil && idleDescriptor.id == nil)
-        let idleSocket = try await connect(idleDescriptor)
+        let idleSocket = try await connect(idleDescriptor, focused: false)
         let idleReady = try await receive(idleSocket)
         precondition(idleReady.type == "ready")
-        try await Task.sleep(for: .milliseconds(200))
-        try await idle.extensionReady()
-        let idleWakes = await idleDeliveries.count
-        precondition(idleWakes == 1)
+        await idle.announce()
+        let again = await idleDeliveries.next()
+        precondition(again.endpoint == idleDescriptor.endpoint && again.token == idleDescriptor.token)
+
+        // Links go to the profile focused last; connecting isn't focus, and among profiles never focused, the first to
+        // connect gets them.
+        let later = try await connect(idleDescriptor, focused: false)
+        _ = try await receive(later)
+        let toFirst = Task { try await idle.open("https://example.test/first-connected") }
+        let firstRequest = try await receive(idleSocket)
+        try await send(BridgeMessage(type: "result", id: firstRequest.id, result: "focused"), to: idleSocket)
+        let firstResult = try await toFirst.value
+        precondition(firstResult == "focused")
+        // The answer to a go-ahead for an unknown link shows the focus change before it was handled.
+        try await send(BridgeMessage(type: "activity"), to: later)
+        try await send(BridgeMessage(type: "authorize-create", id: UUID().uuidString), to: later)
+        let barrier = try await receive(later)
+        precondition(barrier.type == "create-authorized")
+        let toFocused = Task { try await idle.open("https://example.test/focused") }
+        let focusedRequest = try await receive(later)
+        try await send(BridgeMessage(type: "result", id: focusedRequest.id, result: "focused"), to: later)
+        let focusedResult = try await toFocused.value
+        precondition(focusedResult == "focused")
+
+        // The router can take a link back until the go-ahead: then the extension is refused and changes nothing.
+        let withdrawn = Task { try await idle.open("https://example.test/withdrawn") { false } }
+        let withdrawnRequest = try await receive(later)
+        try await send(BridgeMessage(type: "authorize-create", id: withdrawnRequest.id), to: later)
+        let refusal = try await receive(later)
+        precondition(refusal.type == "create-authorized" && refusal.error != nil)
+        try await send(BridgeMessage(type: "result", id: withdrawnRequest.id, error: refusal.error), to: later)
+        do { _ = try await withdrawn.value; preconditionFailure("A withdrawn link was opened") } catch {}
+
         // An installer replacing the app: the connected extension hears so first.
         await idle.replaced()
         let replaced = try await receive(idleSocket)
         precondition(replaced.type == "replaced")
         await idle.stop()
 
+        // A wake that fails late ends only the links still waiting on it: a link released since waits on a newer one.
+        let gate = Gate()
+        let gatedDeliveries = SafariDelivery()
+        let gated = try await SafariBridge(version: "3.2.4") { message in
+            await gatedDeliveries.send(message)
+            try await gate.pass()
+        } enabled: { true }
+        let survivor = Task { try await gated.open("https://example.test/survivor") }
+        let gatedDescriptor = await gatedDeliveries.next()
+        let brief = try await connect(gatedDescriptor)
+        _ = try await receive(brief)
+        _ = try await receive(brief)
+        try await brief.close(code: .protocolCode(.goingAway))
+        let newer = await gatedDeliveries.next()
+        await gate.fail()
+        let lasting = try await connect(newer)
+        _ = try await receive(lasting)
+        let delivered = try await receive(lasting)
+        precondition(delivered.url == "https://example.test/survivor")
+        try await send(BridgeMessage(type: "result", id: delivered.id, result: "opened"), to: lasting)
+        let survived = try await survivor.value
+        precondition(survived == "opened")
+        await gated.stop()
+
         // Connections that never authenticate can't keep the extension out: at capacity the oldest makes room.
         let crowdedDeliveries = SafariDelivery()
         let crowded = try await SafariBridge(version: "3.2.4") { await crowdedDeliveries.send($0) }
-        try await crowded.extensionReady()
+        await crowded.announce()
         let crowdedDescriptor = await crowdedDeliveries.next()
         guard let crowdedURL = crowdedDescriptor.endpoint.flatMap({ URL(string: $0) }) else { preconditionFailure() }
         var silent: [NetworkConnection<WebSocket>] = []
@@ -185,7 +251,8 @@ struct SafariBridgeTests {
         }
         catch { precondition(error.localizedDescription.contains("isn’t enabled in Safari")) }
         await disabled.stop()
-        print("Safari loopback-only WebSocket, token authentication, one-time bootstrap, warm reuse, disconnect handling, " +
-              "room for the extension, app replacement, Safari quitting and a disabled extension passed")
+        print("Safari loopback-only WebSocket, token authentication, bootstrap and re-announcement, warm reuse, focus " +
+              "selection, withdrawn go-aheads, scoped wake failures, disconnect handling, room for the extension, app " +
+              "replacement, Safari quitting and a disabled extension passed")
     }
 }

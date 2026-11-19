@@ -1,7 +1,9 @@
 import { LiveLearning, routeToTab } from './matching.mjs';
 import { reuseIndex, pageKeys, listChanged, pageRules } from './page-keys.mjs';
+import { focusedHere } from './native-port.mjs';
 
 const maxPending = 16;
+const connectionEnded = 'The connection to Link Reuse ended before the tab operation.';
 
 /**
  * The extension's background: it routes links from the native app and from pages, keeps learning current, and gives
@@ -75,7 +77,8 @@ export class BrowserBridge {
     const known = this.pagesKnown;
     this.pagesKnown = true;
     for (const tab of tabs) {
-      if (tab.active && !tab.discarded && (!known || listChanged(previous, index, tab))) this.sendKeys(tab);
+      const showing = tab.active && !tab.discarded && !tab.frozen;
+      if (showing && (!known || listChanged(previous, index, tab))) this.sendKeys(tab);
     }
   }
 
@@ -103,7 +106,10 @@ export class BrowserBridge {
     void this.connect().catch(() => {});
   }
 
-  /** Connects to the native app (once at a time), reloading the extension if the app brings a newer one. */
+  /**
+   * Connects to the native app (once at a time). The greeting states this extension's version and whether this profile
+   * has focus; an app that bundles another version answers with it, and the extension loads that one.
+   */
   connect() {
     if (this.port) return this.ready;
     const port = this.connectPort();
@@ -113,11 +119,14 @@ export class BrowserBridge {
       port.onMessage.addListener(message => {
         if (this.port !== port) return;
         if (message.type === 'replaced') replaced = true;
+        if (message.type === 'create-authorized') this.answerGrant(port, message);
         if (message.type === 'ready') {
-          const version = message.extensionVersion;
-          if (typeof version === 'string' && this.extensionVersion && version !== this.extensionVersion) {
+          if (message.extensionVersion !== this.extensionVersion) {
+            // Leave this connection, so its end changes nothing, and load the version the app bundles.
+            this.port = undefined;
             this.lastError = 'Loading the updated extension…';
-            void Promise.resolve().then(() => this.reload(version)).catch(error => {
+            port.disconnect('version');
+            void Promise.resolve().then(() => this.reload(message.extensionVersion)).catch(error => {
               this.lastError = error.message;
               this.badge('!');
             });
@@ -132,21 +141,50 @@ export class BrowserBridge {
         if (message.type === 'open' && typeof message.id === 'string') this.serveOpen(port, message);
       });
       port.onDisconnect.addListener(() => {
+        if (this.grant?.port === port) {
+          this.grant.reject(new Error(connectionEnded));
+          this.grant = undefined;
+        }
         if (this.port !== port) return;
         this.port = undefined;
         this.connected = false;
-        this.lastError = 'The browser helper is not connected. ' + (this.platform === 'mac'
-          ? 'Run the installed Link Reuse app with --install, then open this popup again.'
-          : 'Run link-reuse --install, then open this popup again.');
+        this.lastError = 'The browser helper is not connected' + (port.error ? ` (${port.error})` : '') + '. ' +
+          (this.platform === 'mac'
+            ? 'Run the installed Link Reuse app with --install, then open this popup again.'
+            : 'Run link-reuse --install, then open this popup again.');
         this.badge('!');
         reject(new Error(this.lastError));
         // An update stopped the helper and it said so: connect to the new one at once. A helper that ends by itself
         // waits for the user's next action, so one that keeps failing can't spin.
         if (replaced) void this.connect().catch(() => {});
       });
-      port.postMessage({ type: 'hello' });
     });
+    // The greeting is the first message; focus changes before it is out follow it.
+    this.greeted = focusedHere(this.browserAPI).catch(() => false).then(focused => {
+      if (this.port === port) port.postMessage({ type: 'hello', extensionVersion: this.extensionVersion, focused });
+    }).catch(() => {});
     return this.ready;
+  }
+
+  /**
+   * Asks the app for its one-time go-ahead before an app link changes anything, so a link it may hand to another
+   * profile is never acted on twice. Links run one at a time, so one grant is outstanding at most; the connection
+   * ending refuses it.
+   */
+  authorize(port, id) {
+    if (this.port !== port || !this.connected) return Promise.reject(new Error(connectionEnded));
+    return new Promise((resolve, reject) => {
+      port.postMessage({ type: 'authorize-create', id });
+      this.grant = { port, id, resolve, reject };
+    });
+  }
+
+  answerGrant(port, message) {
+    const grant = this.grant;
+    if (grant?.port !== port || grant.id !== message.id) return;
+    this.grant = undefined;
+    if (message.error) grant.reject(new Error(message.error));
+    else grant.resolve();
   }
 
   /** A link from the native app; the reply goes back over the same connection. */
@@ -158,8 +196,7 @@ export class BrowserBridge {
       reply({ error: this.lastError || 'The extension is still connecting.' });
       return;
     }
-    const beforeCreate = port.authorizeCreation && (() => port.authorizeCreation(message.id));
-    void this.open(message.url, { beforeCreate }, port)
+    void this.open(message.url, { beforeAct: () => this.authorize(port, message.id) }, port)
       .then(reply, error => reply({ error: error.message }));
   }
 
@@ -173,9 +210,14 @@ export class BrowserBridge {
       if (!['http:', 'https:'].includes(parsed.protocol) || new TextEncoder().encode(url).length > 65536) {
         throw new Error('Invalid web link.');
       }
-      const routed = await routeToTab(url, this.learning, this.browserAPI, this.windowFocusOrder, opening);
-      this.changed();
-      return routed;
+      const learned = this.learning.revision;
+      try {
+        return await routeToTab(url, this.learning, this.browserAPI, this.windowFocusOrder, opening);
+      } finally {
+        // A tab opened here is remembered for a sign-in round trip; that change is saved. Selecting a tab changes
+        // nothing the tab events don't already report.
+        if (this.learning.revision !== learned) this.changed();
+      }
     });
     this.serial = result.catch(() => {}).finally(() => { this.pending--; });
     return result;
@@ -208,7 +250,8 @@ export class BrowserBridge {
   focused(windowId, focusedAt) {
     if (focusedAt > (this.windowFocusOrder.get(windowId) ?? -Infinity)) this.windowFocusOrder.set(windowId, focusedAt);
     this.activity();
-    if (this.connected) this.port.postMessage({ type: 'activity' });
+    const port = this.port;
+    void this.greeted.then(() => { if (this.port === port) port.postMessage({ type: 'activity' }); }).catch(() => {});
   }
 
   forgetWindow(windowId) {
@@ -221,15 +264,14 @@ export class BrowserBridge {
     this.port.postMessage({ type: 'trace', result: event, id: String(Number.isInteger(tabId) ? tabId : 0) });
   }
 
-  async status() {
+  /** What the popup shows. It never waits for the app, which may not answer until it starts. */
+  status() {
     this.activity();
-    await this.ready.catch(() => {});
-    this.learning.prune(await this.queryTabs());
-    await this.persist().catch(() => {});
     return {
       connected: !!this.connected,
-      transportConnected: this.port?.transportConnected ?? !!this.connected,
-      lastError: this.lastError || this.storageError,
+      connecting: !!this.port && !this.connected,
+      lastError: this.lastError,
+      storageError: this.storageError,
       pending: this.pending,
       maxBytes: this.policy.maxCacheBytes,
       stats: { records: this.learning.records.size, bytes: this.learning.bytes },

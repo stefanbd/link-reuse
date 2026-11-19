@@ -1,6 +1,7 @@
 /**
  * Follows each tab's top-level navigations and reports which addresses led to the page it shows: server redirects,
- * automatic client-side redirects and address rewrites, until the user interacts with the page.
+ * automatic client-side redirects and address rewrites, until the user interacts with the page. An address that loads
+ * as itself is reported with no destination, which ends what it was learned to redirect to.
  */
 export class RedirectObserver {
   constructor(maxSources = 32) {
@@ -31,7 +32,9 @@ export class RedirectObserver {
     }
     this.tabs.set(event.tabId, tab);
     this.pending.delete(event.tabId);
-    return this.aliases(tab);
+    // A start seen at this address committed here: whatever it redirected to before, it no longer does.
+    const direct = pending?.source === event.url ? [{ source: event.url, destination: null }] : [];
+    return [...this.aliases(tab), ...direct];
   }
 
   history(event) {

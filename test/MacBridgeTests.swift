@@ -6,6 +6,11 @@ func check(_ value: Bool) { precondition(value) }
 @main
 struct MacBridgeTests {
     static func main() async throws {
+        // A second copy of this executable, standing in for another profile's host: it runs until its input ends.
+        if CommandLine.arguments.contains("--wait") {
+            _ = FileHandle.standardInput.readDataToEndOfFile()
+            exit(0)
+        }
         try MacBridge.prepare()
         guard let started = MacBridge.processStarted(getpid()) else { throw POSIXError(.EPERM) }
         let session = BridgeSession(id: UUID().uuidString, browser: "test.link-reuse", pid: getpid(), started: started, activeAt: 1)
@@ -39,6 +44,18 @@ struct MacBridgeTests {
         let response = try await Task.detached { try MacBridge.send("https://example.test/item?x=one&y=two", session: session) }.value
         precondition(response == "focused")
         try await server.value
+        // A link the router took back (an update handed it on) never reaches the host.
+        let untouched = Task.detached {
+            let client = accept(descriptor, nil, nil)
+            precondition(client >= 0)
+            let stream = FileHandle(fileDescriptor: client, closeOnDealloc: true)
+            check(try Wire.readFrame(from: stream) == nil)
+        }
+        do {
+            _ = try await Task.detached { try MacBridge.send("https://example.test/item", session: session) { false } }.value
+            preconditionFailure("A withdrawn link was written")
+        } catch is CancellationError {}
+        try await untouched.value
         let socketAttributes = try FileManager.default.attributesOfItem(atPath: session.socket.path)
         precondition((socketAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
 
@@ -86,7 +103,8 @@ struct MacBridgeTests {
         abandoned.cancel()
         do { _ = try await abandoned.value; preconditionFailure("A cancelled wait returned") } catch is CancellationError {}
 
-        // A live host that isn't the installed one (left from a replaced version) is ended, so its browser reconnects.
+        // Discovery never ends a process: a live host that isn't the installed one (a replaced version, which the installer
+        // ends) is left alone with its files; a session whose process is gone is removed.
         let stale = Process()
         stale.executableURL = URL(filePath: "/bin/sleep")
         stale.arguments = ["30"]
@@ -97,11 +115,49 @@ struct MacBridgeTests {
         defer { try? FileManager.default.removeItem(at: replaced.file) }
         try replaced.save()
         check(try MacBridge.sessions(browser: replaced.browser, host: host).isEmpty)
+        check(stale.isRunning && FileManager.default.fileExists(atPath: replaced.file.path))
+        stale.terminate()
         stale.waitUntilExit()
-        precondition(stale.terminationReason == .uncaughtSignal && stale.terminationStatus == SIGTERM)
+        check(try MacBridge.sessions(browser: replaced.browser, host: host).isEmpty)
         check(!FileManager.default.fileExists(atPath: replaced.file.path))
 
-        print("macOS IPC round trip, live-session selection, private permissions, bounded framing, " +
-              "extension detection, connection-wait and replaced-host checks passed")
+        // Links go to the profile focused last; connecting isn't focus, and between profiles never focused, the host that
+        // started first wins.
+        let twin = Process(), input = Pipe()
+        twin.executableURL = URL(filePath: CommandLine.arguments[0])
+        twin.arguments = ["--wait"]
+        twin.standardInput = input
+        try twin.run()
+        defer { try? input.fileHandleForWriting.close() }
+        guard let twinStarted = MacBridge.processStarted(twin.processIdentifier) else { throw POSIXError(.ESRCH) }
+        let mine = BridgeSession(id: UUID().uuidString, browser: "test.tie", pid: getpid(), started: started, activeAt: 0)
+        var theirs = BridgeSession(id: UUID().uuidString, browser: "test.tie", pid: twin.processIdentifier,
+                                   started: twinStarted, activeAt: 0)
+        defer { for file in [mine.file, theirs.file] { try? FileManager.default.removeItem(at: file) } }
+        try mine.save()
+        try theirs.save()
+        check(try MacBridge.sessions(browser: "test.tie", host: host).map(\.id) == [mine.id, theirs.id])
+        theirs.activeAt = 5
+        try theirs.save()
+        check(try MacBridge.sessions(browser: "test.tie", host: host).map(\.id) == [theirs.id, mine.id])
+
+        // A Chromium browser can start the host only if its registration names this one.
+        let resourceFolder = support.appending(path: "Resources")
+        try FileManager.default.createDirectory(at: resourceFolder.appending(path: "extension"), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["browsers": [["id": "Test", "name": "Test", "bundleID": "test.browser",
+            "appPath": "/Applications/Test.app", "profilePath": "Test/User Data"]], "extensionOrigin": "chrome-extension://abc/"])
+            .write(to: resourceFolder.appending(path: "configuration.json"))
+        try Data(#"{"version":"3.2.4"}"#.utf8).write(to: resourceFolder.appending(path: "extension/manifest.json"))
+        let resources = try AppResources(directory: resourceFolder)
+        check(!resources.registered(in: browser, applicationSupport: support))
+        try resources.installNativeMessaging(applicationSupport: support)
+        check(resources.registered(in: browser, applicationSupport: support))
+        let registration = support.appending(path: "Test/User Data/NativeMessagingHosts/me.dichev.link_reuse.json")
+        try Data(#"{"name":"me.dichev.link_reuse","path":"/elsewhere"}"#.utf8).write(to: registration)
+        check(!resources.registered(in: browser, applicationSupport: support))
+        check(!resources.registered(in: safari, applicationSupport: support))
+
+        print("macOS IPC round trip, withdrawn links, live-session selection and focus order, private permissions, " +
+              "bounded framing, extension and registration detection, connection-wait and replaced-host checks passed")
     }
 }

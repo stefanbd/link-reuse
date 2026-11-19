@@ -4,8 +4,9 @@ using System.Text.Json.Serialization;
 
 namespace LinkReuse;
 
-internal sealed record Message(string Type, string? Id = null, string? Url = null, string? Error = null, string? Result = null, string? ExtensionVersion = null);
-internal sealed record Session(string Pipe, string Browser, int ProcessId, long Started, long Created, int BrowserProcessId);
+internal sealed record Message(string Type, string? Id = null, string? Url = null, string? Error = null, string? Result = null, string? ExtensionVersion = null, bool? Focused = null);
+/// A connected extension profile. ActiveAt is when it last had focus (0: not since it connected).
+internal sealed record Session(string Pipe, string Browser, int ProcessId, long Started, long ActiveAt, int BrowserProcessId);
 internal sealed record Settings(string Browser);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

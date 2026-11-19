@@ -1,6 +1,8 @@
 // Handles link clicks on web pages from the moment a page starts loading, before its own scripts can act. New-tab
 // gestures go to the extension; a plain link to a page another tab shows switches to that tab.
 (() => {
+  // Private browsing stays the browser's own.
+  if (chrome.extension?.inIncognitoContext) return;
   const mac = /^Mac/.test(navigator.platform);
   const topFrame = window.top === window;
   // False once an extension update orphans this script; clicks are then left to the browser.
@@ -78,8 +80,10 @@
       const url = anchor.href;
       const sameTab = topFrame && ['', '_self', '_top', '_parent'].includes(target) && /^https?:/i.test(url);
       if (sameTab && shownElsewhere(url)) {
+        // Only an answer that nothing changed lets the page load it; anything else may have switched tabs already.
         handOver(event, { type: 'page-navigate', url }, reply => {
-          if (reply?.result !== 'focused') location.assign(url);
+          if (reply?.result === 'none') location.assign(url);
+          else if (reply?.result !== 'focused') failed();
         });
       }
       return skip('target');

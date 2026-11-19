@@ -4,6 +4,11 @@ struct OpenRequest: Equatable, Sendable {
     let browser: BrowserConfiguration
     let url: URL
 
+    init(browser: BrowserConfiguration, url: URL) {
+        self.browser = browser
+        self.url = url
+    }
+
     init?(_ envelope: URL, browsers: [BrowserConfiguration]) {
         guard let components = URLComponents(url: envelope, resolvingAgainstBaseURL: false),
               components.scheme == "linkreuse", components.host == "open",

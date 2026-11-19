@@ -11,6 +11,8 @@ namespace LinkReuse;
 internal sealed class NativeHost
 {
     private readonly ConcurrentDictionary<string, TaskCompletionSource<Message>> pending = new();
+    /// Links the extension was given the go-ahead for: each once, so a link is never acted on twice.
+    private readonly ConcurrentDictionary<string, bool> granted = new();
     private readonly SemaphoreSlim outputLock = new(1);
     private readonly SemaphoreSlim clients = new(16);
     private readonly Stream output = Console.OpenStandardOutput();
@@ -20,11 +22,22 @@ internal sealed class NativeHost
     {
         var input = Console.OpenStandardInput();
         // The extension greets as soon as it connects; the browser closing the input ends the wait otherwise.
-        if ((await Wire.Read(input))?.Type != "hello") throw new InvalidDataException("Missing extension greeting.");
+        if (await Wire.Read(input) is not { Type: "hello" } hello) throw new InvalidDataException("Missing extension greeting.");
+        // Always the version this app bundles: an extension of another version loads it, and this connection, which
+        // routes nothing, ends with it.
+        var version = Registration.ExtensionVersion();
+        await Send(new Message("ready", ExtensionVersion: version));
+        if (hello.ExtensionVersion != version)
+        {
+            while (await Wire.Read(input) is not null) { }
+            return;
+        }
         var (browser, browserProcessId) = Browsers.ParentBrowser();
         Directory.CreateDirectory(Registration.Sessions);
         using var process = Process.GetCurrentProcess();
-        var session = new Session("linkreuse-" + Guid.NewGuid().ToString("N"), browser, process.Id, process.StartTime.ToUniversalTime().Ticks, DateTime.UtcNow.Ticks, browserProcessId);
+        // Links go to the profile focused last; connecting isn't focus.
+        var session = new Session("linkreuse-" + Guid.NewGuid().ToString("N"), browser, process.Id, process.StartTime.ToUniversalTime().Ticks,
+            hello.Focused == true ? DateTime.UtcNow.Ticks : 0, browserProcessId);
         var file = Path.Combine(Registration.Sessions, session.Pipe + ".json");
         // An installer replacing this helper sets the event named after its session: tell the extension, so it connects
         // to the new helper at once, and end.
@@ -34,32 +47,59 @@ internal sealed class NativeHost
             replaced.WaitOne();
             try { await Send(new Message("replaced")); }
             catch (Exception error) when (error is IOException or OperationCanceledException) { }
-            File.Delete(file);
+            Forget(file);
             Environment.Exit(0);
         });
         var listener = Listen(session.Pipe);
         try
         {
-            File.WriteAllText(file, JsonSerializer.Serialize(session, WireJson.Default.Session));
-            await Send(new Message("ready", ExtensionVersion: Registration.ExtensionVersion()));
-            while (await Wire.Read(input) is { } message)
-            {
-                if (message.Type == "result" && message.Id is not null && pending.TryRemove(message.Id, out var waiting)) waiting.TrySetResult(message);
-                if (message.Type == "activity")
-                {
-                    session = session with { Created = DateTime.UtcNow.Ticks };
-                    File.WriteAllText(file + ".tmp", JsonSerializer.Serialize(session, WireJson.Default.Session));
-                    File.Move(file + ".tmp", file, true);
-                }
-            }
+            Save(file, session);
+            // The helper serves while both its extension and its listener do: either ending ends it.
+            await await Task.WhenAny(Receive(input, file, session), listener);
         }
         finally
         {
             lifetime.Cancel();
-            File.Delete(file);
+            Forget(file);
             foreach (var waiting in pending.Values) waiting.TrySetCanceled();
-            try { await listener; } catch (OperationCanceledException) { }
+            try { await listener; } catch { }
         }
+    }
+
+    private async Task Receive(Stream input, string file, Session session)
+    {
+        while (await Wire.Read(input, lifetime.Token) is { } message)
+        {
+            switch (message.Type)
+            {
+                case "result" when message.Id is not null && pending.TryRemove(message.Id, out var waiting):
+                    waiting.TrySetResult(message);
+                    break;
+                case "authorize-create" when message.Id is not null:
+                    var allowed = pending.ContainsKey(message.Id) && granted.TryAdd(message.Id, true);
+                    await Send(new Message("create-authorized", message.Id, Error: allowed ? null : "The external request is no longer available."));
+                    break;
+                case "activity":
+                    // Best effort: if the write fails, the last focus stands.
+                    session = session with { ActiveAt = DateTime.UtcNow.Ticks };
+                    try { Save(file, session); }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+                    break;
+            }
+        }
+    }
+
+    private static void Save(string file, Session session)
+    {
+        File.WriteAllText(file + ".tmp", JsonSerializer.Serialize(session, WireJson.Default.Session));
+        File.Move(file + ".tmp", file, true);
+    }
+
+    /// Unpublishes the session; a failure here can't keep the helper from ending.
+    private static void Forget(string file)
+    {
+        try { File.Delete(file); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     private async Task Send(Message message)
@@ -82,12 +122,13 @@ internal sealed class NativeHost
         }
     }
 
-    /// One link: it ends with the extension's answer, or when the router or this helper goes away.
+    /// One link: it ends with the extension's answer, or when the router or this helper goes away. Its connection is
+    /// closed before its place is freed, so there are never more than 16.
     private async Task Serve(NamedPipeServerStream pipe)
     {
+        string? id = null;
         await using (pipe)
         {
-            string? id = null;
             try
             {
                 var request = await Wire.Read(pipe, lifetime.Token);
@@ -103,11 +144,13 @@ internal sealed class NativeHost
             {
                 // An accepted request may still finish; never reopen it through a second path.
             }
-            finally { if (id is not null) pending.TryRemove(id, out _); clients.Release(); }
         }
+        if (id is not null) { pending.TryRemove(id, out _); granted.TryRemove(id, out _); }
+        clients.Release();
     }
 
-    internal static IEnumerable<Session> LiveSessions(string browser)
+    /// The browser's connected profiles. Routing uses only this version's helpers (`current`); an installer stops the rest.
+    internal static IEnumerable<Session> LiveSessions(string browser, bool current = true)
     {
         if (!Directory.Exists(Registration.Sessions)) yield break;
         foreach (var file in Directory.EnumerateFiles(Registration.Sessions, "linkreuse-*.json"))
@@ -120,14 +163,17 @@ internal sealed class NativeHost
                 if (session is null || session.Browser != browser || !session.Pipe.StartsWith("linkreuse-", StringComparison.Ordinal) ||
                     !Guid.TryParseExact(session.Pipe[10..], "N", out _)) continue;
                 using var process = Process.GetProcessById(session.ProcessId);
-                if (process.StartTime.ToUniversalTime().Ticks != session.Started || process.ProcessName != "LinkReuse") session = null;
+                if (process.StartTime.ToUniversalTime().Ticks != session.Started || process.ProcessName != "LinkReuse" ||
+                    current && !string.Equals(process.MainModule?.FileName, Registration.HostExe, StringComparison.OrdinalIgnoreCase)) session = null;
             }
             catch (Exception error) when (error is IOException or JsonException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { session = null; }
             if (session is not null) yield return session;
         }
     }
 
-    private static Session? Newest(string browser) => LiveSessions(browser).MaxBy(value => value.Created);
+    /// The profile focused last; among profiles never focused, the one whose helper started first.
+    private static Session? Newest(string browser) => LiveSessions(browser).OrderByDescending(value => value.ActiveAt)
+        .ThenBy(value => value.Started).FirstOrDefault();
 
     /// Brings the browser forward (starting it only when it has no window) and waits for its extension to connect, however
     /// long the browser takes, or until it quits.

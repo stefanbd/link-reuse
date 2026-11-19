@@ -7,9 +7,9 @@ import pathlib
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
-import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APP = pathlib.Path.home() / 'Applications/Link Reuse.app'
@@ -46,15 +46,31 @@ def swap_contents(left, right):
         raise OSError(code, os.strerror(code))
 
 
-def owned_processes():
-    """This user's processes running the installed app: the router, the browser hosts and Safari's handler."""
-    paths = {str(APP / path) for path in ['Contents/MacOS/LinkReuse', 'Contents/Helpers/LinkReuseHost',
-                                         'Contents/PlugIns/LinkReuseSafari.appex/Contents/MacOS/LinkReuseSafari']}
-    found = set()
-    for line in subprocess.check_output(['ps', '-axo', 'pid=,uid=,comm='], text=True).splitlines():
-        values = line.strip().split(None, 2)
-        if len(values) == 3 and int(values[1]) == os.getuid() and values[2] in paths: found.add(int(values[0]))
-    return found
+# What ends each part of a replaced version: the router and the browser hosts hand over to the new version on SIGUSR1;
+# Safari's handler just ends, so Safari starts the new one.
+EXECUTABLES = {'Contents/MacOS/LinkReuse': signal.SIGUSR1, 'Contents/Helpers/LinkReuseHost': signal.SIGUSR1,
+               'Contents/PlugIns/LinkReuseSafari.appex/Contents/MacOS/LinkReuseSafari': signal.SIGTERM}
+
+
+def executable(pid):
+    """The path of the file a process runs. macOS resolves it from the file itself, so it follows a rename."""
+    proc_pidpath = ctypes.CDLL(None, use_errno=True).proc_pidpath
+    proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    buffer = ctypes.create_string_buffer(4096)
+    length = proc_pidpath(pid, buffer, ctypes.sizeof(buffer))
+    return os.fsdecode(buffer.raw[:length]) if length > 0 else None
+
+
+def old_processes(contents):
+    """This user's processes still running the replaced version, which now lies at `contents`, with their signals.
+    Whatever started since the swap runs the new version, so it is not among them."""
+    signals = {os.path.realpath(contents.parent / path): value for path, value in EXECUTABLES.items()}
+    found = {}
+    for line in subprocess.check_output(['ps', '-axo', 'pid=,uid='], text=True).splitlines():
+        pid, uid = map(int, line.split())
+        path = executable(pid) if uid == os.getuid() else None
+        if path in signals: found[pid] = path
+    return {pid: (path, signals[path]) for pid, path in found.items()}
 
 
 def main():
@@ -63,51 +79,42 @@ def main():
     args = parser.parse_args()
     run('codesign', '--verify', '--deep', '--strict', args.app)
     APP.parent.mkdir(exist_ok=True)
-    temporary = tempfile.TemporaryDirectory(prefix='.link-reuse-', dir=APP.parent)
-    transaction = pathlib.Path(temporary.name)
-    work = transaction / '.install'
-    stage = work / 'Link Reuse.app'
-    archive = transaction / 'rollback.zip'
-    work.mkdir(parents=True, mode=0o700)
+    # The new version is staged in a folder that isn't an app, so nothing registers it; after the swap the same folder
+    # holds the old version until the new one is registered.
+    transaction = pathlib.Path(tempfile.mkdtemp(prefix='.link-reuse-', dir=APP.parent))
+    stage = transaction / 'stage'
     replacing = APP.exists()
-    installed = False
+    keep = False
     try:
         shutil.copytree(args.app, stage, symlinks=True)
-        run('codesign', '--verify', '--deep', '--strict', stage)
-        if replacing:
-            run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', APP, archive)
-            with zipfile.ZipFile(archive) as saved:
-                if saved.testzip() is not None: raise RuntimeError('The rollback archive is damaged.')
-        previous = owned_processes()
+        if replacing: swap_contents(APP / 'Contents', stage / 'Contents')
+        else: stage.rename(APP)
         try:
-            if replacing: swap_contents(APP / 'Contents', stage / 'Contents')
-            else: stage.rename(APP)
-            installed = True
             run('codesign', '--verify', '--deep', '--strict', APP)
-            shutil.rmtree(work)
             run(APP / 'Contents/MacOS/LinkReuse', '--install')
             register(APP)
         except BaseException:
-            if installed and replacing:
-                if not stage.exists():
-                    work.mkdir(parents=True, mode=0o700)
-                    run('ditto', '-x', '-k', archive, work)
-                swap_contents(APP / 'Contents', stage / 'Contents')
-                shutil.rmtree(work)
-                run(APP / 'Contents/MacOS/LinkReuse', '--install')
-                register(APP)
-            elif installed:
-                unregister(APP)
-                work.mkdir(parents=True, exist_ok=True, mode=0o700)
-                APP.rename(stage)
+            try:
+                if replacing:
+                    swap_contents(APP / 'Contents', stage / 'Contents')
+                    run(APP / 'Contents/MacOS/LinkReuse', '--install')
+                    register(APP)
+                else:
+                    unregister(APP)
+                    APP.rename(stage)
+            except BaseException:
+                keep = True
+                print(f'Restoring the previous version failed. {APP} and {stage} hold the two versions; '
+                      'nothing was deleted.', file=sys.stderr)
             raise
-        # Only now end the replaced version: each part tells its extension it was replaced, so the extension connects
-        # to the new one at once.
-        for pid in previous & owned_processes():
-            try: os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError: pass
+        # Only now end the replaced version: each part hands over to the new one, so nothing waits for the user.
+        if replacing:
+            for pid, (path, value) in old_processes(stage / 'Contents').items():
+                if executable(pid) == path:
+                    try: os.kill(pid, value)
+                    except ProcessLookupError: pass
     finally:
-        temporary.cleanup()
+        if not keep: shutil.rmtree(transaction, ignore_errors=True)
     shortcut = APP.parent / 'Link Reuse Extension'
     if not shortcut.exists() and not shortcut.is_symlink():
         shortcut.symlink_to(APP / 'Contents/Resources/extension', target_is_directory=True)

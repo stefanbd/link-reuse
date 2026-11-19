@@ -40,8 +40,8 @@ python3 macos/install.py
 
 - Without `--sign`, the app is ad-hoc signed, and Safari then shows the extension only while **Allow unsigned
   extensions** is on.
-- `install.py` swaps the app in atomically, restores the previous one on failure and keeps no backups. It also takes
-  `--app <path>` to install a bundle you already have.
+- `install.py` swaps the app in atomically, restores the previous one on failure and keeps no backups. If restoring
+  fails too, it keeps both versions and says where. It also takes `--app <path>` to install a bundle you already have.
 - `LinkReuse --safari-status` reports whether the Safari extension is installed and enabled.
 
 Keep exactly one registered copy of the app. Any LaunchServices change to its Safari extension makes PlugInKit stop the
@@ -97,7 +97,8 @@ changes. Bump the Windows version whenever anything Windows ships changes, which
 Windows releases are automatic. A push to `main` that touches `extension/` or `windows/` runs the Windows workflow.
 Once its tests and native self-test pass, it publishes `windows-v<Version>` and commits the new Scoop manifest, and
 `scoop update link-reuse` picks it up. If shipped files changed without a version bump, the workflow fails rather than
-skipping.
+skipping. Running a failed release job again finishes it: an existing release is listed in the bucket from its own
+manifest, as long as `main` still ships that version.
 
 The macOS workflow runs the tests, builds the app and uploads it as a workflow artifact. macOS releases are not
 published.

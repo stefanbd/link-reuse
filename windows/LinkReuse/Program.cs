@@ -104,16 +104,16 @@ internal static class Program
             var executable = Path.Combine(package, "LinkReuse.exe");
             File.WriteAllText(manifest, "{\"version\":\"3.1.2\"}");
             File.WriteAllText(executable, "old host");
-            var oldHost = Registration.StageHost(package, runtime);
+            var oldHost = Registration.StageHost(package, runtime, "0.1.2");
             using (var held = File.Open(oldHost, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                File.WriteAllText(manifest, "{\"version\":\"3.1.3\"}");
+                // A new app version stages its own helper, even with the same extension.
                 File.WriteAllText(executable, "new host");
-                var newHost = Registration.StageHost(package, runtime);
+                var newHost = Registration.StageHost(package, runtime, "0.1.3");
                 if (newHost == oldHost || !newHost.StartsWith(runtime + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
                     File.ReadAllText(newHost) != "new host" || File.ReadAllText(oldHost) != "old host") throw new Exception("Host update replaced the running version or stayed inside the package.");
                 using var newHeld = File.Open(newHost, FileMode.Open, FileAccess.Read, FileShare.Read);
-                if (Registration.StageHost(package, runtime) != newHost) throw new Exception("Reinstall changed the immutable host path.");
+                if (Registration.StageHost(package, runtime, "0.1.3") != newHost) throw new Exception("Reinstall changed the immutable host path.");
             }
         }
         finally { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); }

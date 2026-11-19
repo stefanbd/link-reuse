@@ -8,7 +8,7 @@ import { permittedTabs } from './matching.mjs';
 const observer = new RedirectObserver();
 // Read once at startup: Safari can update the manifest on disk before this background reloads.
 const extensionVersion = chrome.runtime.getManifest().version;
-const connectPort = prepareNative(chrome, undefined, extensionVersion);
+const connectPort = prepareNative(chrome);
 const ready = start();
 // Safari has no history-state events; its tab URL updates stand in for them.
 const withoutHistoryEvents = !chrome.webNavigation.onHistoryStateUpdated;
@@ -68,10 +68,29 @@ const redirects = aliases => aliases.map(alias => ({ kind: 'redirect', ...alias 
 
 // Learning from navigation
 
+/**
+ * Whether a tab is private, so its navigation never reaches learning. Only Safari can show private tabs to the
+ * extension (Chromium's manifest says incognito: not_allowed). A tab is asked about once, and its events wait behind
+ * that answer in order; a tab that can't be classified counts as private.
+ */
+const privateTabs = new Map();
+const notPrivate = Promise.resolve(false);
+function isPrivate(tabId) {
+  if (!isSafari(chrome)) return notPrivate;
+  let known = privateTabs.get(tabId);
+  if (!known) privateTabs.set(tabId, known = chrome.tabs.get(tabId).then(tab => tab.incognito === true, () => true));
+  return known;
+}
+if (isSafari(chrome)) chrome.tabs.onCreated.addListener(tab => privateTabs.set(tab.id, Promise.resolve(tab.incognito === true)));
+
+/** Runs learning work for a tab in the order its events came, once the tab is known not to be private. */
+const forTab = (tabId, work) => void Promise.all([ready, isPrivate(tabId)])
+  .then(([context, hidden]) => { if (!hidden) work(context); });
+
 /** Learns from a top-level navigation event; operation is 'before', 'committed' or 'history'. */
 function navigate(event, operation) {
   if (event.frameId !== 0 || event.documentLifecycle === 'prerender') return;
-  void ready.then(({ policy, bridge }) => {
+  forTab(event.tabId, ({ policy, bridge }) => {
     if (!allowsLearning(event.url, policy)) {
       observer.remove(event.tabId);
       bridge.changed();
@@ -104,6 +123,7 @@ chrome.webNavigation.onErrorOccurred.addListener(event => {
 // Tabs and windows
 
 chrome.tabs.onRemoved.addListener(tabId => {
+  privateTabs.delete(tabId);
   observer.remove(tabId);
   changed();
 });
@@ -179,10 +199,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       void ready.then(({ bridge }) => bridge.trace('page-skip-' + message.reason, tab.id));
       return;
     case 'canonical':
-      if (topFrame) void ready.then(({ bridge }) => learnFromPage(message, sender, bridge));
+      if (topFrame && !tab.incognito) forTab(tab.id, ({ bridge }) => learnFromPage(message, sender, bridge));
       return;
     case 'interaction':
-      if (topFrame) void ready.then(() => observer.interact(tab.id, sender.documentId));
+      if (topFrame && !tab.incognito) forTab(tab.id, () => observer.interact(tab.id, sender.documentId));
       return;
     case 'status':
     case 'clear-learning':

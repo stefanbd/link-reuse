@@ -8,6 +8,7 @@ import { reuseIndex, pageKeys } from '../extension/page-keys.mjs';
 
 const prints = (...keys) => keys.map(fingerprint).sort((left, right) => left - right);
 import { safariTransport } from './safari-support.mjs';
+import { prepareNative } from '../extension/native-port.mjs';
 
 const policy = JSON.parse(readFileSync(new URL('../extension/learning-policy.json', import.meta.url)));
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url)));
@@ -53,6 +54,7 @@ function nativePort(ready = { type: 'ready' }) {
     postMessage(message) {
       this.sent.push(message);
       if (message.type === 'hello') queueMicrotask(() => ready ? this.emit(ready) : this.disconnect());
+      if (message.type === 'authorize-create') queueMicrotask(() => this.emit({ type: 'create-authorized', id: message.id }));
     },
   };
 }
@@ -213,19 +215,98 @@ test('restoring during a pending navigation retains the committed page only unti
   assert.equal(learning.records.size, 0);
 });
 
+test('restored learning waits for a tab list with a web page: a new tab page or a private tab is not the restored session', () => {
+  const learning = new LiveLearning(policy);
+  learning.restore([{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/item' }]);
+  learning.prune([{ id: 1, url: 'chrome://newtab/', status: 'complete' },
+    { id: 2, url: 'https://example.test/other', status: 'complete', incognito: true }]);
+  assert.equal(learning.records.size, 1);
+  learning.prune([{ id: 1, url: 'https://example.test/other', status: 'complete' }]);
+  assert.equal(learning.records.size, 0);
+});
+
 test('cache write failures are reported and retried on the next change', async () => {
   const h = browser([{ url: 'https://example.test/live' }]);
   const session = learningSession();
   const { bridge } = sessionBridge(h, session, { saveLearning: async () => { throw new Error('Storage unavailable.'); } });
   bridge.observe([{ kind: 'redirect', source: 'https://example.test/short', destination: h.tabs[0].url }]);
   await assert.rejects(settleBridge(bridge), /Storage unavailable/);
-  const status = await bridge.status();
-  assert.match(status.lastError, /Could not save learned links/);
+  const status = bridge.status();
+  assert.match(status.storageError, /Could not save learned links/);
   bridge.saveLearning = records => session.save(records);
   bridge.changed();
   await settleBridge(bridge);
-  assert.equal((await bridge.status()).lastError, '');
+  assert.equal(bridge.status().storageError, '');
   assert.equal(session.read().length, 1);
+});
+
+test('selecting a tab runs no maintenance pass; opening an account launcher, which is remembered, does', async () => {
+  const h = browser([{ url: 'https://example.test/item' }]);
+  let queries = 0;
+  const { bridge } = sessionBridge(h, learningSession(), { queryTabs: async () => { queries++; return h.api.tabs.query(); } });
+  await settleBridge(bridge);
+  const before = queries;
+  assert.deepEqual(await bridge.open('https://example.test/item'), { result: 'focused' });
+  await settleBridge(bridge);
+  assert.equal(queries, before);
+  assert.deepEqual(await bridge.open('https://example-production.snowflakecomputing.com/console/login#/'), { result: 'opened' });
+  await settleBridge(bridge);
+  assert.equal(queries, before + 1);
+});
+
+test('a frozen or discarded tab in front gets no list: it asks when it wakes', async () => {
+  const h = browser([{ url: 'https://example.test/a', active: true, frozen: true },
+    { url: 'https://example.test/b', active: true, windowId: 2, discarded: true },
+    { url: 'https://example.test/c', active: true, windowId: 3 }]);
+  const sent = [];
+  h.api.tabs.sendMessage = async id => { sent.push(id); };
+  const { bridge } = sessionBridge(h, learningSession());
+  bridge.publish(h.tabs);
+  await new Promise(setImmediate);
+  assert.deepEqual(sent, [3]);
+});
+
+test('the greeting says whether this profile has focus, and a focus change made meanwhile follows it', async () => {
+  for (const [windows, focused] of [[[{ id: 1, focused: true }], true], [[{ id: 1, focused: true, incognito: true }], false],
+    [[{ id: 1, focused: false }], false]]) {
+    const h = browser([], windows);
+    let release;
+    h.api.windows.getAll = () => new Promise(resolve => { release = resolve; });
+    const port = nativePort({ type: 'ready', extensionVersion: '3.2.4' });
+    const bridge = new WindowsBridge(policy, { connectPort: () => port, queryTabs: async () => [], browserAPI: h.api,
+      badge() {}, resetLearning() {}, extensionVersion: '3.2.4' });
+    bridge.focused(1, 1);
+    await new Promise(setImmediate);
+    assert.deepEqual(port.sent, []);
+    release(windows);
+    await bridge.ready;
+    await new Promise(setImmediate);
+    assert.deepEqual(port.sent.map(message => message.type), ['hello', 'activity']);
+    assert.deepEqual(port.sent[0], { type: 'hello', extensionVersion: '3.2.4', focused });
+  }
+});
+
+test('the popup shows learning at once while the app is still connecting', () => {
+  const silent = { onMessage: { addListener() {} }, onDisconnect: { addListener() {} }, postMessage() {}, disconnect() {} };
+  const bridge = new WindowsBridge(policy, { connectPort: () => silent, queryTabs: async () => [], badge() {},
+    resetLearning() {}, learningState: [{ kind: 'redirect', source: 'https://example.test/short', destination: 'https://example.test/item' }] });
+  const status = bridge.status();
+  assert.equal(status.connected, false);
+  assert.equal(status.connecting, true);
+  assert.equal(status.stats.records, 1);
+});
+
+test('why the browser could not start the helper reaches the popup', async () => {
+  const disconnects = [];
+  const api = { runtime: { getURL: () => 'chrome-extension://test/', connectNative: () => ({
+    onMessage: { addListener() {} }, onDisconnect: { addListener: fn => disconnects.push(fn) }, postMessage() {}, disconnect() {} }) },
+  windows: { async getAll() { return []; } } };
+  const bridge = new WindowsBridge(policy, { connectPort: prepareNative(api), queryTabs: async () => [], browserAPI: api,
+    badge() {}, resetLearning() {} });
+  api.runtime.lastError = { message: 'Specified native messaging host not found.' };
+  for (const fn of disconnects) fn();
+  await assert.rejects(bridge.ready);
+  assert.match(bridge.lastError, /\(Specified native messaging host not found\.\)/);
 });
 
 test('unchanged tab activity does not rewrite session learning', async () => {
@@ -252,7 +333,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
   const platform = mode === 'safari' ? 'mac' : mode;
   const pending = timers(context);
   const h = browser([{ url: 'https://example.test/live', status: 'unloaded', discarded: true }]);
-  const port = nativePort();
+  const port = nativePort({ type: 'ready', extensionVersion: '3.2.4' });
   const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); },
     emit(...args) { for (const fn of this.listeners) fn(...args); } });
   let release;
@@ -277,7 +358,7 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
       get: () => new Promise(resolve => { release = resolve; }), async set(value) { saved = structuredClone(value); } },
       session: { async get() { return {}; }, async set() { throw new Error('Session storage must not own learned links.'); } } },
     permissions: { getAll: async () => ({ origins: ['<all_urls>'] }) },
-    tabs: { ...h.api.tabs, onUpdated: event(), onRemoved: event(), onActivated: event(),
+    tabs: { ...h.api.tabs, onUpdated: event(), onRemoved: event(), onActivated: event(), onCreated: event(),
       async query(filter) { queries.push(filter); return [{ id: 7 }]; },
       sendMessage() { throw new Error('Sleeping tab content must not be contacted to match it.'); } },
     scripting: { async executeScript(details) { injected.push(details); } },
@@ -314,6 +395,8 @@ for (const mode of ['win', 'mac', 'safari']) test(`the ${mode} background restor
     await new Promise(setImmediate);
     const request = { type: 'open', id: 'first-after-idle', url: 'https://example.test/short' };
     if (safari) safari.emit(request); else port.emit(request);
+    // The tab isn't selected yet, so the extension asks the app's go-ahead first: one more round trip.
+    await new Promise(setImmediate);
     await new Promise(setImmediate);
     assert.deepEqual((safari?.sent ?? port.sent).find(message => message.type === 'result' && message.id === 'first-after-idle'),
       { type: 'result', id: 'first-after-idle', result: 'focused' });
@@ -408,29 +491,83 @@ test('a tab that navigates during concurrent window lookup still fails final rev
   assert.deepEqual(h.calls, []);
 });
 
-test('creation waits for transport authorization, while existing-tab reuse needs none', async () => {
+test('an app link changes nothing before the go-ahead from the app; a tab already in front needs none', async () => {
   const h = browser([]);
   let release;
   const opening = routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
-    beforeCreate: () => new Promise(resolve => { release = resolve; }),
+    beforeAct: () => new Promise(resolve => { release = resolve; }),
   });
   await new Promise(setImmediate);
   assert.deepEqual(h.calls, []);
   release();
   assert.deepEqual(await opening, { result: 'opened' });
   assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
+  // Selecting a tab is a change too: it waits the same way.
+  h.calls.length = 0;
+  const selecting = routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
+    beforeAct: () => new Promise(resolve => { release = resolve; }),
+  });
+  await new Promise(setImmediate);
+  assert.deepEqual(h.calls, []);
+  release();
+  assert.deepEqual(await selecting, { result: 'focused' });
+  assert.deepEqual(h.calls, [['focus', 1, { active: true }]]);
+  // Already selected in the focused window: nothing to change, nothing to ask.
+  h.tabs[0].active = true;
   h.calls.length = 0;
   assert.deepEqual(await routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
-    beforeCreate() { throw new Error('Reuse must not request creation authorization'); },
+    beforeAct() { throw new Error('Nothing changes, so nothing is asked'); },
   }), { result: 'focused' });
-  assert.equal(h.calls.some(call => call[0] === 'create'), false);
+  assert.deepEqual(h.calls, []);
 });
 
-test('lost creation authorization cannot create a tab or window', async () => {
-  for (const windows of [[{ id: 1, focused: true }], []]) {
-    const h = browser([], windows);
+test('a Chromium helper that ends while a link waits for its go-ahead leaves the browser unchanged', async () => {
+  const h = browser([]);
+  const port = nativePort();
+  port.postMessage = function (message) {
+    this.sent.push(message);
+    if (message.type === 'hello') queueMicrotask(() => this.emit({ type: 'ready' }));
+    if (message.type === 'authorize-create') queueMicrotask(() => this.disconnect());
+  };
+  const bridge = new WindowsBridge(policy, { connectPort: () => port, queryTabs: h.api.tabs.query, browserAPI: h.api,
+    badge() {}, resetLearning() {} });
+  await bridge.ready;
+  port.emit({ type: 'open', id: 'lost', url: 'https://example.test/new' });
+  await bridge.serial;
+  await new Promise(setImmediate);
+  assert.deepEqual(h.calls, []);
+});
+
+test('in Safari, a link to a website the extension may not see is reported instead of opening a possible duplicate', async () => {
+  const h = browser([]);
+  h.api.runtime.getURL = value => 'safari-web-extension://test/' + value;
+  h.api.permissions = { getAll: async () => ({ origins: ['https://allowed.test/*'] }),
+    contains: async ({ origins }) => origins[0] === 'https://allowed.test/*' };
+  await assert.rejects(routeToTab('https://example.test/item', new LiveLearning(policy), h.api),
+    /Allow Link Reuse on example\.test in Safari Settings/);
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(await routeToTab('https://allowed.test/item', new LiveLearning(policy), h.api), { result: 'opened' });
+});
+
+test('a tab that moves on while the go-ahead is pending is left alone', async () => {
+  const h = browser([{ url: place }]);
+  let release;
+  const opening = routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
+    beforeAct: () => new Promise(resolve => { release = resolve; }),
+  });
+  await new Promise(setImmediate);
+  h.tabs[0].url = 'https://unrelated.test/';
+  release();
+  await assert.rejects(opening, /matching tab changed/);
+  assert.deepEqual(h.calls, []);
+});
+
+test('a refused or lost go-ahead changes nothing: no tab, window, selection or focus', async () => {
+  for (const [tabs, windows] of [[[], [{ id: 1, focused: true }]], [[], []],
+    [[{ url: place }], [{ id: 1, focused: false }]]]) {
+    const h = browser(tabs, windows);
     await assert.rejects(routeToTab(place, new LiveLearning(policy), h.api, new Map(), {
-      beforeCreate() { throw new Error('Connection ended'); },
+      beforeAct() { throw new Error('Connection ended'); },
     }), /Connection ended/);
     assert.deepEqual(h.calls, []);
   }
@@ -737,24 +874,17 @@ test('resource identities are supplied by URL rules while generic matching keeps
 
 test('each helper an update replaces says so and is reconnected at once, however many in a row', async context => {
   const pending = timers(context);
-  for (const safari of [false, true]) {
-    const ports = [];
-    const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
-      connectPort: () => {
-        const port = nativePort();
-        if (safari) Object.assign(port, { transportConnected: false, authorizeCreation: async () => {} });
-        ports.push(port);
-        return port;
-      } });
-    for (let update = 1; update <= 3; update++) {
-      await bridge.ready;
-      ports.at(-1).emit({ type: 'replaced' });
-      ports.at(-1).disconnect();
-      assert.equal(ports.length, update + 1);
-    }
+  const ports = [];
+  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {},
+    connectPort: () => { const port = nativePort(); ports.push(port); return port; } });
+  for (let update = 1; update <= 3; update++) {
     await bridge.ready;
-    assert.equal(bridge.connected, true);
+    ports.at(-1).emit({ type: 'replaced' });
+    ports.at(-1).disconnect();
+    assert.equal(ports.length, update + 1);
   }
+  await bridge.ready;
+  assert.equal(bridge.connected, true);
   assert.equal(pending.size, 0);
 });
 
@@ -796,8 +926,19 @@ test('a newer installed helper requests a reload before routing another link', a
     extensionVersion: '3.1.2', reload: async version => { reloaded.push(version); } });
   await assert.rejects(bridge.connect(), /Loading the updated extension/);
   assert.deepEqual(reloaded, ['3.1.3']);
+  // The mismatched connection is left at once; nothing it carries is acted on.
+  assert.equal(bridge.port, undefined);
   port.emit({ type: 'open', id: 'during-reload', url: 'https://example.test/' });
-  assert.equal(port.sent.find(message => message.id === 'during-reload').error, bridge.lastError);
+  assert.equal(port.sent.some(message => message.id === 'during-reload'), false);
+});
+
+test('a helper that states no version counts as a different one', async () => {
+  const port = nativePort({ type: 'ready' });
+  const reloaded = [];
+  const bridge = new WindowsBridge(policy, { queryTabs: async () => [], badge() {}, connectPort: () => port,
+    extensionVersion: '3.1.2', reload: async version => { reloaded.push(version); } });
+  await assert.rejects(bridge.connect(), /Loading the updated extension/);
+  assert.deepEqual(reloaded, [undefined]);
 });
 
 test('a reload failure is reported without disconnecting into a reload loop', async context => {
@@ -809,7 +950,8 @@ test('a reload failure is reported without disconnecting into a reload loop', as
   await new Promise(setImmediate);
   assert.equal(bridge.lastError, 'Load the installed current/extension folder.');
   assert.equal(pending.size, 0);
-  assert.equal(bridge.port, port);
+  // Nothing reconnects by itself: the next try is the user's next action.
+  assert.equal(bridge.port, undefined);
 });
 
 test('two simultaneous external requests create one tab and then reuse it', async () => {
@@ -817,7 +959,11 @@ test('two simultaneous external requests create one tab and then reuse it', asyn
   const listeners = [];
   const sent = [];
   const port = { onMessage: { addListener(fn) { listeners.push(fn); } }, onDisconnect: { addListener() {} },
-    postMessage(message) { sent.push(message); if (message.type === 'hello') queueMicrotask(() => listeners.forEach(fn => fn({ type: 'ready' }))); }, disconnect() {} };
+    postMessage(message) {
+      sent.push(message);
+      if (message.type === 'hello') queueMicrotask(() => listeners.forEach(fn => fn({ type: 'ready' })));
+      if (message.type === 'authorize-create') queueMicrotask(() => listeners.forEach(fn => fn({ type: 'create-authorized', id: message.id })));
+    }, disconnect() {} };
   const bridge = new WindowsBridge(policy, { connectPort: () => port, queryTabs: h.api.tabs.query, badge() {}, resetLearning() {}, browserAPI: h.api });
   await bridge.connect();
   for (const id of ['one', 'two']) listeners.forEach(fn => fn({ type: 'open', id, url: 'https://example.test/new' }));
@@ -884,8 +1030,12 @@ test('webpage clicks and external opens share one queue and cannot simultaneousl
   port.emit({ type: 'open', id: 'external', url: 'https://example.test/new' });
   assert.deepEqual(await clicked, { result: 'opened' });
   await bridge.serial;
+  await new Promise(setImmediate);
   assert.equal(h.calls.filter(call => call[0] === 'create').length, 1);
-  assert.equal(port.sent.find(message => message.id === 'external').result, 'focused');
+  // The new tab isn't selected, so the external link asks the go-ahead before selecting it.
+  assert.deepEqual(port.sent.filter(message => message.id === 'external').map(message => message.type),
+    ['authorize-create', 'result']);
+  assert.equal(port.sent.find(message => message.id === 'external' && message.type === 'result').result, 'focused');
 });
 
 test('a change starts a pass at once, and a slow browser never has more than one query in flight plus one catch-up', async () => {

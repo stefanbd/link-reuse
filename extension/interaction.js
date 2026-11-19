@@ -1,5 +1,7 @@
 // Tells the background when the user first interacts with the page, which ends its automatic redirect chain.
 (() => {
+  // Private browsing is never learned from.
+  if (chrome.extension?.inIncognitoContext) return;
   let interaction = false;
 
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {

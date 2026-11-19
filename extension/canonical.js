@@ -1,5 +1,7 @@
 // Reports the page's canonical address (rel=canonical, or og:url when there is none) whenever it changes.
 (() => {
+  // Private browsing is never learned from.
+  if (chrome.extension?.inIncognitoContext) return;
   let previous;
   let observer;
 

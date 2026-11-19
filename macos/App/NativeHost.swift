@@ -8,23 +8,31 @@ enum NativeHost {
               let browser = parent.bundleIdentifier,
               resources.browsers.contains(where: { $0.bundleID == browser }) else { throw POSIXError(.EPERM) }
         signal(SIGPIPE, SIG_IGN)
-        guard let hello = try Wire.readFrame(from: .standardInput),
-              try JSONDecoder().decode(BridgeMessage.self, from: hello).type == "hello" else {
-            throw POSIXError(.EINVAL)
-        }
-        try MacBridge.prepare()
-        guard let started = MacBridge.processStarted(getpid()) else { throw POSIXError(.EPERM) }
-        let now = Date.timeIntervalSinceReferenceDate
-        var session = BridgeSession(id: UUID().uuidString, browser: browser, pid: getpid(), started: started, activeAt: now)
-        let server = try MacBridge.descriptor(path: session.socket, listen: true)
+        guard let frame = try Wire.readFrame(from: .standardInput) else { return }
+        let hello = try JSONDecoder().decode(BridgeMessage.self, from: frame)
+        guard hello.type == "hello" else { throw POSIXError(.EINVAL) }
         let exchange = BridgeExchange { message in
             try Wire.writeFrame(JSONEncoder().encode(message), to: .standardOutput)
         }
+        // Always the version this app bundles: an extension of another version loads it, and this connection, which
+        // routes nothing, ends with it.
+        try await exchange.send(BridgeMessage(type: "ready", extensionVersion: resources.extensionVersion))
+        guard hello.extensionVersion == resources.extensionVersion else {
+            while try Wire.readFrame(from: .standardInput) != nil {}
+            return
+        }
+        try MacBridge.prepare()
+        guard let started = MacBridge.processStarted(getpid()) else { throw POSIXError(.EPERM) }
+        // Links go to the profile focused last; connecting isn't focus.
+        var session = BridgeSession(id: UUID().uuidString, browser: browser, pid: getpid(), started: started,
+                                    activeAt: hello.focused == true ? Date.timeIntervalSinceReferenceDate : 0)
+        let server = try MacBridge.descriptor(path: session.socket, listen: true)
         let listener = Thread { serve(server, exchange: exchange) }
         listener.start()
-        let replaced = onTermination { [session] in
+        let replaced = onReplacement { [session] in
             try? await exchange.send(BridgeMessage(type: "replaced"))
             session.remove()
+            exit(0)
         }
         defer {
             replaced.cancel()
@@ -33,13 +41,20 @@ enum NativeHost {
             close(server)
             session.remove()
         }
-        try await exchange.send(BridgeMessage(type: "ready", extensionVersion: resources.extensionVersion))
         try session.save()
         while let data = try Wire.readFrame(from: .standardInput) {
-            let request = try JSONDecoder().decode(BridgeMessage.self, from: data)
-            switch request.type {
-            case "result": await exchange.receive(request)
-            case "activity": session.activeAt = Date.timeIntervalSinceReferenceDate; try session.save()
+            let message = try JSONDecoder().decode(BridgeMessage.self, from: data)
+            switch message.type {
+            case "result": await exchange.receive(message)
+            case "authorize-create":
+                guard let id = message.id else { throw POSIXError(.EINVAL) }
+                let granted = await exchange.authorizeCreation(id, profile: nil)
+                try await exchange.send(BridgeMessage(type: "create-authorized", id: id,
+                    error: granted ? nil : "The external request is no longer available."))
+            case "activity":
+                // Best effort: if the write fails, the last focus stands.
+                session.activeAt = Date.timeIntervalSinceReferenceDate
+                try? session.save()
             default: throw POSIXError(.EINVAL)
             }
         }

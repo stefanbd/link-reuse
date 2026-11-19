@@ -18,7 +18,7 @@ test('client redirect chains preserve earlier source URLs', () => {
   observer.before(event(A)); observer.committed(event(B));
   observer.before(event(C, 'two'));
   assert.deepEqual(observer.committed(event(C, 'two', ['client_redirect'])), [
-    { source: A, destination: C }, { source: B, destination: C },
+    { source: A, destination: C }, { source: B, destination: C }, { source: C, destination: null },
   ]);
 });
 
@@ -39,7 +39,17 @@ test('ordinary new navigation does not inherit the previous page', () => {
   const observer = new RedirectObserver();
   observer.before(event(A)); observer.committed(event(A));
   observer.before(event(B, 'two'));
-  assert.deepEqual(observer.committed(event(B, 'two')), []);
+  assert.deepEqual(observer.committed(event(B, 'two')), [{ source: B, destination: null }]);
+});
+
+test('an address that loads as itself ends what it was learned to redirect to, but only from a start it saw', () => {
+  const observer = new RedirectObserver();
+  observer.before(event(A)); observer.committed(event(B));
+  observer.before(event(A, 'two'));
+  assert.deepEqual(observer.committed(event(A, 'two')), [{ source: A, destination: null }]);
+  // A commit without the start it belongs to (an event the background missed) proves nothing.
+  const late = new RedirectObserver();
+  assert.deepEqual(late.committed(event(A)), []);
 });
 
 test('stale document events cannot alter the current chain', () => {
@@ -68,5 +78,5 @@ test('a redirect is learned though Safari reports a cross-site process swap as a
   replaced.before(event(A));
   replaced.failed(1);
   replaced.before(event(B));
-  assert.deepEqual(replaced.committed(event(B, 'two', undefined)), []);
+  assert.deepEqual(replaced.committed(event(B, 'two', undefined)), [{ source: B, destination: null }]);
 });

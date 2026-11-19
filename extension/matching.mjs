@@ -159,10 +159,13 @@ export class LiveLearning {
 
   /**
    * Drops records no open tab needs any more. A starting browser starts its extensions before it restores its windows,
-   * and restores them all at once, so records restored from storage wait for a tab list with tabs in it.
+   * and restores them all at once, so records restored from storage wait for a tab list with a web page in it (a new tab
+   * page alone isn't the restored session).
    */
   prune(tabs) {
-    if (this.restoredUnchecked && !tabs.length) return;
+    if (this.restoredUnchecked && !tabs.some(tab => !tab.incognito && allowsLearning(tab.pendingUrl || tab.url, this.policy))) {
+      return;
+    }
     this.restoredUnchecked = false;
     const live = new Set();
     const byId = new Map(tabs.map(tab => [tab.id, tab]));
@@ -208,9 +211,83 @@ export class LiveLearning {
 
 /**
  * Opens url in the tab that already shows it, or in one new tab. A background click (active: false) moves the match
- * beside its source instead; a same-tab link (reuseOnly) only ever switches to another tab.
+ * beside its source instead; a same-tab link (reuseOnly) only ever switches to another tab, and answers none when it
+ * changed nothing, so the page loads the link itself. An app link waits for opening.beforeAct, the app's one-time
+ * go-ahead, before its first change.
  */
 export async function routeToTab(url, learning, browser, windowFocusOrder = new Map(), opening = {}) {
+  let found;
+  try { found = await findTab(url, learning, browser, windowFocusOrder, opening); }
+  catch (error) {
+    if (opening.reuseOnly) return { result: 'none' };
+    throw error;
+  }
+  const { request, source, window, windows } = found;
+  let { match } = found;
+  const activateWindow = id => {
+    const target = windows.find(value => value.id === id);
+    if (target?.focused) return Promise.resolve();
+    return browser.windows.update(id, { ...(target?.state === 'minimized' ? { state: 'normal' } : {}), focused: true });
+  };
+
+  if (match) {
+    // A background click keeps its page in front and moves the match beside it. Chromium regroups a moved tab by its
+    // new neighbours, so the move stays within the tab's group; otherwise (or if it can't move) the match is selected.
+    const sameGroup = (match.groupId ?? -1) === (source?.groupId ?? -1);
+    if (opening.active === false && source && match.id !== source.id && sameGroup) {
+      const sameWindow = match.windowId === source.windowId;
+      const index = sameWindow && match.index < source.index ? source.index : source.index + 1;
+      if (match.pinned || (sameWindow && match.index === index)) return { result: 'moved' };
+      match = await goAhead(match, request, learning, browser, opening);
+      if (await browser.tabs.move(match.id, { windowId: source.windowId, index }).then(() => true, () => false)) {
+        return { result: 'moved' };
+      }
+    }
+    if (match.active && windows.find(value => value.id === match.windowId)?.focused) return { result: 'focused' };
+    match = await goAhead(match, request, learning, browser, opening);
+    // Both requests go out at once; the browser applies them in order.
+    await Promise.all([
+      match.active || browser.tabs.update(match.id, { active: true }),
+      activateWindow(match.windowId),
+    ]);
+    return { result: 'focused' };
+  }
+
+  if (opening.reuseOnly) return { result: 'none' };
+  // Safari lists only tabs on websites it lets the extension see; a site outside that can't be checked for a match.
+  if ((request.allowed || request.entry) && isSafari(browser) &&
+      !await browser.permissions.contains({ origins: [new URL(request.url).origin + '/*'] })) {
+    throw new Error(`Allow Link Reuse on ${new URL(request.url).host} in Safari Settings → Extensions → ` +
+      'Link Reuse, so it can find that website\'s open tabs.');
+  }
+  await opening.beforeAct?.();
+  const active = opening.active !== false;
+  const beside = window && source?.windowId === window.id ? { index: source.index + 1 } : {};
+  const created = window
+    ? await browser.tabs.create({ windowId: window.id, url, active, ...beside })
+    : (await browser.windows.create({ url, incognito: false, type: 'normal', focused: true })).tabs?.[0];
+  learning.rememberLaunch(created?.id, request);
+  learning.rememberCreated(created?.id, url);
+  if (window && active) await activateWindow(window.id);
+  return { result: 'opened' };
+}
+
+/** Waits for an app link's go-ahead, then checks the tab again: it may have moved on meanwhile. */
+async function goAhead(match, request, learning, browser, opening) {
+  if (!opening.beforeAct) return match;
+  await opening.beforeAct();
+  return stillMatching(match.id, request, learning, browser);
+}
+
+/** The tab as it is now, if it still shows what the link asks for. */
+async function stillMatching(id, request, learning, browser) {
+  const tab = learning.addressed(await browser.tabs.get(id));
+  if (!learning.matches(request, tab)) throw new Error('The matching tab changed. Please open the link again.');
+  return tab;
+}
+
+/** Reads what a link would act on, changing nothing: the matching tab as it is now, or none. */
+async function findTab(url, learning, browser, windowFocusOrder, opening) {
   const [allWindows, source, listedTabs] = await Promise.all([
     browser.windows.getAll({ windowTypes: ['normal'] }),
     Number.isInteger(opening.sourceTabId) ? browser.tabs.get(opening.sourceTabId) : null,
@@ -220,54 +297,17 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
   const tabs = await learning.withCreated(listedTabs, browser);
   const windows = allWindows.filter(value => !value.incognito);
   const window = await targetWindow(browser, windows, source, windowFocusOrder);
-  const activateWindow = id => {
-    const target = windows.find(value => value.id === id);
-    if (target?.focused) return Promise.resolve();
-    return browser.windows.update(id, { ...(target?.state === 'minimized' ? { state: 'normal' } : {}), focused: true });
-  };
 
   // Matches are checked against live tabs, so pruning stays off this path, except for learning restored at startup.
   if (learning.restoredUnchecked) learning.prune(tabs);
   const request = learning.resolve(url);
   const reusable = opening.reuseOnly ? tabs.filter(tab => tab.id !== source?.id) : tabs;
   const preferred = reusable.find(tab => tab.active && tab.windowId === window?.id);
-  const match = (preferred && learning.matches(request, preferred) && preferred) ||
+  const listed = (preferred && learning.matches(request, preferred) && preferred) ||
     reusable.find(tab => urlKey(tab.pendingUrl || tab.url) === request.url && learning.matches(request, tab)) ||
     reusable.find(tab => learning.matches(request, tab));
-
-  if (match) {
-    const current = learning.addressed(await browser.tabs.get(match.id));
-    if (!learning.matches(request, current)) throw new Error('The matching tab changed. Please open the link again.');
-    // A background click keeps its page in front and moves the match beside it. Chromium regroups a moved tab by its
-    // new neighbours, so the move stays within the tab's group; otherwise (or if it can't move) the match is selected.
-    const sameGroup = (current.groupId ?? -1) === (source?.groupId ?? -1);
-    if (opening.active === false && source && current.id !== source.id && sameGroup) {
-      const sameWindow = current.windowId === source.windowId;
-      const index = sameWindow && current.index < source.index ? source.index : source.index + 1;
-      const inPlace = current.pinned || (sameWindow && current.index === index);
-      const moved = inPlace ||
-        await browser.tabs.move(current.id, { windowId: source.windowId, index }).then(() => true, () => false);
-      if (moved) return { result: 'moved' };
-    }
-    // Both requests go out at once; the browser applies them in order.
-    await Promise.all([
-      current.active || browser.tabs.update(match.id, { active: true }),
-      activateWindow(current.windowId),
-    ]);
-    return { result: 'focused' };
-  }
-
-  if (opening.reuseOnly) return { result: 'none' };
-  const active = opening.active !== false;
-  await opening.beforeCreate?.();
-  const beside = window && source?.windowId === window.id ? { index: source.index + 1 } : {};
-  const created = window
-    ? await browser.tabs.create({ windowId: window.id, url, active, ...beside })
-    : (await browser.windows.create({ url, incognito: false, type: 'normal', focused: true })).tabs?.[0];
-  learning.rememberLaunch(created?.id, request);
-  learning.rememberCreated(created?.id, url);
-  if (window && active) await activateWindow(window.id);
-  return { result: 'opened' };
+  if (!listed) return { request, source, window, windows };
+  return { request, match: await stillMatching(listed.id, request, learning, browser), source, window, windows };
 }
 
 /** The window a new tab opens in: the source's, else the focused, last-focused or most recently used visible one. */

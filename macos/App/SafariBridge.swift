@@ -13,7 +13,9 @@ actor SafariBridge {
         let connection: NetworkConnection<WebSocket>
         let number: UInt64
         var authenticated = false
+        /// When the context's profile last had focus (0: not since it connected), and when it authenticated.
         var activity: UInt64 = 0
+        var order: UInt64 = 0
     }
 
     private let listener: NetworkListener<WebSocket>
@@ -25,11 +27,11 @@ actor SafariBridge {
     private var serving: Task<Void, Never>?
     private var clients: [String: Client] = [:]
     private var connections: UInt64 = 0
-    private var activity: UInt64 = 0
-    private lazy var exchange = BridgeExchange { [weak self] message in
-        guard let self else { throw POSIXError(.EPIPE) }
-        try await self.deliver(message)
-    }
+    private var clock: UInt64 = 0
+    private var wakes: UInt64 = 0
+    /// The listener failed: this instance takes no more links, and the app makes a new one.
+    private(set) var ended = false
+    private lazy var exchange = BridgeExchange { [weak self] _ in await self?.dispatch() }
 
     init(
         version: String,
@@ -67,9 +69,6 @@ actor SafariBridge {
 
     deinit { serving?.cancel() }
 
-    /// Whether an extension context is connected and authenticated.
-    var connected: Bool { clients.values.contains(where: \.authenticated) }
-
     /// Safari quit: the links still waiting for it end with error.
     func end(_ error: any Error) async { await exchange.finish(error) }
 
@@ -87,13 +86,16 @@ actor SafariBridge {
     }
 
     private func finish() async {
+        ended = true
         clients.removeAll()
         await exchange.finish()
     }
 
-    func open(_ url: String) async throws -> String {
+    /// Opens a link in Safari. `pass` is asked at the extension's go-ahead: whether the link is still this app's.
+    func open(_ url: String, pass: @escaping @Sendable () -> Bool = { true }) async throws -> String {
+        guard !ended else { throw POSIXError(.EPIPE) }
         let reply: BridgeMessage
-        do { reply = try await exchange.request(url) }
+        do { reply = try await exchange.request(url, pass: pass) }
         catch {
             let failure = error as NSError
             Self.log.error("Safari transport: failed \(failure.domain, privacy: .public) \(failure.code)")
@@ -101,42 +103,51 @@ actor SafariBridge {
         }
         if let error = reply.error {
             Self.log.error("Safari transport: extension operation failed")
-            throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+            throw failure(error)
         }
         guard let result = reply.result, ["focused", "opened"].contains(result) else { throw POSIXError(.EINVAL) }
         Self.log.notice("Safari transport: completed \(result, privacy: .public)")
         return result
     }
 
-    private func deliver(_ message: BridgeMessage) async throws {
-        // The most recently active authenticated connection (profile) gets the request.
-        let newest = clients.filter { $0.value.authenticated }.max { $0.value.activity < $1.value.activity }
-        if let (profile, client) = newest, let id = message.id {
-            Self.log.notice("Safari transport: channel \(id, privacy: .public)")
-            if await exchange.claim(id, profile: profile) {
-                do {
-                    try await send(message, to: client.connection)
-                    Self.log.notice("Safari transport: sent")
-                } catch { await disconnected(profile, connection: client.connection) }
-            }
-        } else {
-            try await extensionReady()
-            // A disabled extension never connects, so its link ends here instead of waiting. Safari takes about a
-            // second to answer, so the question follows the wake: the link is on its way meanwhile.
-            guard try await enabled() else {
-                throw NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                    "Link Reuse isn’t enabled in Safari. Turn it on in Safari Settings → Extensions."])
-            }
-        }
-    }
+    /// Sends Safari's extension the connection address, so each of its contexts (one per profile) connects.
+    func announce() async { await dispatch(announcing: true) }
 
-    /// Sends the connection address when a request is waiting or no extension context is connected yet.
-    func extensionReady() async throws {
-        if connected, await exchange.unclaimed().isEmpty { return }
+    /// The one path that moves waiting links: when a link arrives, a context authenticates, or one ends. Each free link
+    /// goes to the authenticated context whose profile had focus last (the first to connect if none did). With none
+    /// connected, Safari's extension is sent the address; if that fails, the links that were waiting on it end.
+    private func dispatch(announcing: Bool = false) async {
+        let ready = clients.filter(\.value.authenticated)
+            .max { ($0.value.activity, $1.value.order) < ($1.value.activity, $0.value.order) }
+        if let (identity, client) = ready {
+            for request in await exchange.unclaimed() {
+                guard let id = request.id, await exchange.claim(id, profile: identity) else { continue }
+                do {
+                    try await send(request, to: client.connection)
+                    Self.log.notice("Safari transport: sent")
+                } catch {
+                    await disconnected(identity, connection: client.connection)
+                    return
+                }
+            }
+            if !announcing { return }
+        }
+        wakes += 1
+        let wake = wakes
+        let waiting = await exchange.waiting(on: wake)
+        guard waiting || announcing else { return }
         Self.log.notice("Safari transport: bootstrap")
         let code = HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)
-        let token = Data(code).base64EncodedString()
-        try await wake(BridgeMessage(type: "connect", endpoint: endpoint, token: token))
+        do {
+            try await self.wake(BridgeMessage(type: "connect", endpoint: endpoint, token: Data(code).base64EncodedString()))
+            // A disabled extension never connects, so its links end here instead of waiting. Safari takes about a
+            // second to answer, so the question follows the wake: the links are on their way meanwhile.
+            if waiting, !(try await enabled()) {
+                throw failure("Link Reuse isn’t enabled in Safari. Turn it on in Safari Settings → Extensions.")
+            }
+        } catch {
+            await exchange.wakeFailed(wake, error: error)
+        }
     }
 
     private func accept(_ connection: NetworkConnection<WebSocket>) async {
@@ -163,22 +174,21 @@ actor SafariBridge {
                   HMAC<SHA256>.isValidAuthenticationCode(code, authenticating: Self.authenticationData, using: key) else {
                 throw POSIXError(.EPERM)
             }
+            // Always the version this app bundles: an extension of another version loads it.
             try await send(BridgeMessage(type: "ready", extensionVersion: version, profile: identity), to: connection)
-            guard hello.extensionVersion == version else { throw POSIXError(.EPROTO) }
-            if hello.result == "active" { activity += 1 }
+            guard hello.extensionVersion == version, clients[identity] != nil else { throw POSIXError(.EPROTO) }
+            clock += 1
             clients[identity]?.authenticated = true
-            clients[identity]?.activity = hello.result == "active" ? activity : 0
+            clients[identity]?.order = clock
+            clients[identity]?.activity = hello.focused == true ? clock : 0
             Self.log.notice("Safari transport: authenticated")
-            for request in await exchange.unclaimed() {
-                guard let id = request.id, await exchange.claim(id, profile: identity) else { continue }
-                try await send(request, to: connection)
-            }
+            await dispatch()
             while true {
                 var message = try await Self.read(connection)
                 switch message.type {
                 case "activity":
-                    activity += 1
-                    clients[identity]?.activity = activity
+                    clock += 1
+                    clients[identity]?.activity = clock
                 case "trace":
                     guard let event = message.result, BridgeMessage.traceEvents.contains(event) else {
                         throw POSIXError(.EINVAL)
@@ -216,9 +226,9 @@ actor SafariBridge {
 
     private func disconnected(_ identity: String, connection: NetworkConnection<WebSocket>) async {
         guard clients.removeValue(forKey: identity) != nil else { return }
-        let retryable = await exchange.disconnected(profile: identity)
+        await exchange.disconnected(profile: identity)
         if connection.state == .ready { try? await connection.close() }
-        if retryable { try? await extensionReady() }
+        await dispatch()
     }
 
     private static func read(_ connection: NetworkConnection<WebSocket>) async throws -> BridgeMessage {

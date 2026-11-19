@@ -1,132 +1,114 @@
 // The connection to the native app, behind one port-like interface.
 // Chromium: native messaging. Safari: native messaging only to learn the address and token of the app's local
-// WebSocket, then every request and reply over that authenticated socket.
+// WebSocket, then every message over that authenticated socket. A Safari port is exactly one socket: when the socket
+// ends, or the app announces a different one, the port ends and everything it carried ends with it.
 
 const chromiumHost = 'me.dichev.link_reuse';
 const safariApp = 'me.dichev.LinkReuse';
-const connectionEnded = 'The Safari connection ended before the tab operation.';
 
 export const isSafari = api => api.runtime.getURL('').startsWith('safari-web-extension:');
 
-/** Returns a function that connects; Safari's first connection starts right away so it is ready for the first link. */
-export function prepareNative(api, Socket = globalThis.WebSocket, extensionVersion) {
-  if (!isSafari(api)) return () => connectNative(api);
-  let prepared = connectNative(api, Socket, extensionVersion);
+/** Whether a normal, non-private window of this profile has focus: what makes it the profile external links go to. */
+export async function focusedHere(api) {
+  const windows = await api.windows.getAll({ windowTypes: ['normal'] });
+  return windows.some(window => window.focused && !window.incognito);
+}
+
+/**
+ * Returns a function that connects. Safari's first connection starts at once, so it is ready for the first link, and a
+ * connection that ends because the app moved hands the new address to the next one.
+ */
+export function prepareNative(api, Socket = globalThis.WebSocket) {
+  if (!isSafari(api)) {
+    return () => {
+      const port = api.runtime.connectNative(chromiumHost);
+      // Why the helper couldn't start or ended, for the popup.
+      port.onDisconnect.addListener(() => { port.error = api.runtime.lastError?.message; });
+      return port;
+    };
+  }
+  const handover = {};
+  let prepared = connectSafari(api, Socket, handover);
   return () => {
-    if (prepared.closed) prepared = connectNative(api, Socket, extensionVersion);
+    if (prepared.closed) prepared = connectSafari(api, Socket, handover);
     return prepared;
   };
 }
 
-export function connectNative(api, Socket = globalThis.WebSocket, extensionVersion) {
-  if (!isSafari(api)) {
-    const port = api.runtime.connectNative(chromiumHost);
-    port.onDisconnect.addListener(() => { void api.runtime.lastError; });
-    return port;
-  }
-  extensionVersion ??= api.runtime.getManifest().version;
+/** Only a loopback WebSocket address and a 32-byte token are accepted. */
+function validEndpoint(message) {
+  const endpoint = new URL(message.endpoint);
+  const plain = !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash &&
+    endpoint.pathname === '/';
+  const loopback = endpoint.protocol === 'ws:' && endpoint.hostname === '127.0.0.1' && endpoint.port;
+  const token = typeof message.token === 'string' && atob(message.token).length === 32;
+  return plain && loopback && token ? endpoint : null;
+}
+
+function connectSafari(api, Socket, handover) {
   const incoming = api.runtime.connectNative(safariApp);
   const messages = new Set();
   const disconnects = new Set();
-  const queued = [];
-  const authorizations = new Map();
+  let descriptor;
   let socket;
+  let greeting;
   let authenticated = false;
-  let ready = false;
   let closed = false;
-  let nativeVersion = extensionVersion;
+  // A focus change the app hasn't heard about yet, sent once it has accepted this connection.
+  let activity = false;
 
-  function emit(message) {
-    for (const listener of messages) listener(message);
-  }
+  const open = () => socket?.readyState === 1;
+  const send = message => socket.send(JSON.stringify(message));
 
-  /** Hands queued requests to the background once it is listening and the socket is authenticated. */
-  function flush() {
-    if (closed || !ready || !authenticated || !messages.size) return;
-    for (const message of queued.splice(0)) emit(message);
-  }
-
-  /** Only a loopback WebSocket address and a 32-byte token are accepted. */
-  function validEndpoint(message) {
-    const endpoint = new URL(message.endpoint);
-    const plain = !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash &&
-      endpoint.pathname === '/';
-    const loopback = endpoint.protocol === 'ws:' && endpoint.hostname === '127.0.0.1' && endpoint.port;
-    const token = typeof message.token === 'string' && atob(message.token).length === 32;
-    return plain && loopback && token ? endpoint : null;
+  /** The socket greets once it is open and the background has greeted, so nothing arrives before it listens. */
+  function greet() {
+    if (closed || !greeting || !open() || socket.greeted) return;
+    socket.greeted = true;
+    send({ ...greeting, token: descriptor.token });
   }
 
   function receive(value) {
     if (value.type === 'ready') {
-      if (value.extensionVersion !== extensionVersion) {
-        nativeVersion = value.extensionVersion;
-        if (ready) {
-          emit(value);
-          port.disconnect('version');
-        }
-        return;
-      }
       authenticated = true;
-      flush();
-    } else if (authenticated && value.type === 'replaced') {
-      emit(value);
-    } else if (authenticated && value.type === 'create-authorized' && typeof value.id === 'string') {
-      const waiting = authorizations.get(value.id);
-      authorizations.delete(value.id);
-      if (!waiting) return;
-      if (value.error) waiting.reject(new Error(value.error));
-      else waiting.resolve();
-    } else if (authenticated && value.type === 'open' && typeof value.id === 'string' &&
-        typeof value.url === 'string') {
-      if (queued.length >= 16) {
-        port.disconnect('queue');
-        return;
+      for (const listener of messages) listener(value);
+      if (activity && !closed) {
+        activity = false;
+        send({ type: 'activity' });
       }
-      queued.push(value);
-      flush();
+    } else if (authenticated && ['open', 'create-authorized', 'replaced'].includes(value.type)) {
+      for (const listener of messages) listener(value);
     }
   }
 
   function connect(message) {
-    try {
-      const endpoint = validEndpoint(message);
-      if (!endpoint || (socket?.url === endpoint.href && socket.readyState < 2)) return;
-      const previous = socket;
-      const current = new Socket(endpoint.href);
-      socket = current;
-      authenticated = false;
-      previous?.close();
-      const live = () => !closed && socket === current;
-      current.onopen = () => {
-        if (!live() || current.readyState !== 1) return;
-        current.send(JSON.stringify({ type: 'hello', token: message.token, extensionVersion }));
-        // A focused normal window makes this the profile external links go to.
-        void api.windows.getAll({ windowTypes: ['normal'] }).then(windows => {
-          if (live() && current.readyState === 1 && windows.some(window => window.focused && !window.incognito)) {
-            current.send(JSON.stringify({ type: 'activity' }));
-          }
-        }).catch(() => {});
-      };
-      current.onmessage = event => {
-        if (!live()) return;
-        try {
-          if (typeof event.data !== 'string' || event.data.length > 1048576) throw new Error('Invalid frame');
-          receive(JSON.parse(event.data));
-        } catch { port.disconnect('message', typeof event.data === 'string' ? 0 : 1); }
-      };
-      current.onerror = () => {
-        if (socket === current && nativeVersion === extensionVersion) port.disconnect('socket-error');
-      };
-      current.onclose = event => {
-        if (socket === current && nativeVersion === extensionVersion) port.disconnect('socket-close', event.code);
-      };
-    } catch {}
+    const endpoint = validEndpoint(message);
+    if (!endpoint) return;
+    if (descriptor) {
+      if (descriptor.endpoint === message.endpoint && descriptor.token === message.token) return;
+      // A new app instance: this connection ends with the old one, and the next connects to the new one at once.
+      handover.descriptor = message;
+      for (const listener of messages) listener({ type: 'replaced' });
+      port.disconnect('endpoint');
+      return;
+    }
+    socket = new Socket(endpoint.href);
+    descriptor = message;
+    socket.onopen = greet;
+    socket.onmessage = event => {
+      if (closed) return;
+      try {
+        if (typeof event.data !== 'string' || event.data.length > 1048576) throw new Error('Invalid frame');
+        receive(JSON.parse(event.data));
+      } catch { port.disconnect('message', typeof event.data === 'string' ? 0 : 1); }
+    };
+    socket.onerror = () => port.disconnect('socket-error');
+    socket.onclose = event => port.disconnect('socket-close', event.code);
   }
 
   const port = {
     get closed() { return closed; },
-    get transportConnected() { return authenticated && socket?.readyState === 1; },
-    onMessage: { addListener(listener) { messages.add(listener); flush(); } },
+    get transportConnected() { return authenticated && open(); },
+    onMessage: { addListener: listener => messages.add(listener) },
     onDisconnect: { addListener: listener => disconnects.add(listener) },
 
     /** Ends the connection once, reporting a URL-free reason to the app's log. */
@@ -135,54 +117,26 @@ export function connectNative(api, Socket = globalThis.WebSocket, extensionVersi
       closed = true;
       const report = { type: 'diagnostic', result: reason, error: String(code) };
       let diagnostic;
-      if (authenticated && socket?.readyState === 1) {
-        try {
-          socket.send(JSON.stringify(report));
-          diagnostic = Promise.resolve();
-        } catch { diagnostic = api.runtime.sendNativeMessage(safariApp, report); }
-      } else diagnostic = api.runtime.sendNativeMessage(safariApp, report);
-      authenticated = false;
-      queued.length = 0;
-      for (const waiting of authorizations.values()) waiting.reject(new Error(connectionEnded));
-      authorizations.clear();
+      try {
+        if (!authenticated || !open()) throw new Error('No channel');
+        send(report);
+        diagnostic = Promise.resolve();
+      } catch { diagnostic = api.runtime.sendNativeMessage(safariApp, report); }
       socket?.close();
       void diagnostic.catch(() => {}).finally(() => incoming.disconnect());
       for (const listener of disconnects) listener();
     },
 
-    /**
-     * Asks the app for one-time permission to create a tab, so an interrupted request is never replayed. The app answers
-     * at once; the connection ending rejects it.
-     */
-    authorizeCreation(id) {
-      if (closed || !authenticated || socket?.readyState !== 1) return Promise.reject(new Error(connectionEnded));
-      if (authorizations.has(id) || authorizations.size >= 16) {
-        return Promise.reject(new Error('The tab operation is already pending.'));
-      }
-      return new Promise((resolve, reject) => {
-        authorizations.set(id, { resolve, reject });
-        try {
-          socket.send(JSON.stringify({ type: 'authorize-create', id }));
-        } catch (error) {
-          authorizations.delete(id);
-          reject(error);
-        }
-      });
-    },
-
     postMessage(message) {
       if (closed) throw new Error('The Safari connection ended.');
       if (message.type === 'hello') {
-        ready = true;
-        emit({ type: 'ready', extensionVersion: nativeVersion });
-        if (nativeVersion !== extensionVersion) {
-          port.disconnect('version');
-          return;
-        }
-        flush();
-      } else if (authenticated && socket?.readyState === 1) {
-        socket.send(JSON.stringify(message));
-      } else if (message.type !== 'activity') {
+        greeting = message;
+        greet();
+      } else if (authenticated && open()) {
+        send(message);
+      } else if (message.type === 'activity') {
+        activity = true;
+      } else {
         port.disconnect('unavailable');
       }
     },
@@ -193,9 +147,13 @@ export function connectNative(api, Socket = globalThis.WebSocket, extensionVersi
     if (!socket || socket.readyState >= 2) port.disconnect('bootstrap');
   });
   incoming.onMessage.addListener(message => {
-    if (!closed && message?.name === 'link-reuse' && message.userInfo?.type === 'connect') connect(message.userInfo);
+    if (closed || message?.name !== 'link-reuse' || message.userInfo?.type !== 'connect') return;
+    try { connect(message.userInfo); } catch {}
   });
-  // A late bootstrap reply can't override the authenticated channel, which alone decides version compatibility.
-  void api.runtime.sendNativeMessage(safariApp, { type: 'hello' }).catch(() => {});
+  const known = handover.descriptor;
+  handover.descriptor = undefined;
+  if (known) connect(known);
+  // Otherwise the extension's native handler starts the app if it isn't running, and the app sends its address.
+  else void api.runtime.sendNativeMessage(safariApp, { type: 'hello' }).catch(() => {});
   return port;
 }

@@ -3,9 +3,9 @@ const storageText = document.querySelector('#storage');
 const clear = document.querySelector('#clear');
 
 function describe(status) {
-  if (!status.connected || status.lastError) return status.lastError || 'Native connection unavailable.';
-  if (status.transportConnected === false) return 'Tab reuse is ready. The external helper connects on demand.';
-  return 'Tab reuse learning is connected.';
+  if (status.storageError || status.lastError) return status.storageError || status.lastError;
+  if (status.connecting) return 'Connecting to Link Reuse…';
+  return status.connected ? 'Tab reuse learning is connected.' : 'Native connection unavailable.';
 }
 
 function show(status) {
@@ -14,7 +14,7 @@ function show(status) {
   storageText.textContent = stats
     ? `${stats.records} learned links · ${(stats.bytes / 1024).toFixed(1)} KiB / ${status.maxBytes / 1048576} MiB`
     : '';
-  clear.disabled = !status.connected;
+  clear.disabled = false;
 }
 
 chrome.runtime.sendMessage({ type: 'status' }).then(show).catch(error => { statusText.textContent = error.message; });
@@ -24,8 +24,7 @@ clear.addEventListener('click', async () => {
   try {
     const status = await chrome.runtime.sendMessage({ type: 'clear-learning' });
     show(status);
-    if (status.connected && !status.lastError) {
-      statusText.textContent = 'Learned links cleared. New browsing can teach new links.';
-    }
+    if (!status.storageError) statusText.textContent = 'Learned links cleared. New browsing can teach new links.';
   } catch (error) { statusText.textContent = error.message; }
+  clear.disabled = false;
 });

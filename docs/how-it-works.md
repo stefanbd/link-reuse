@@ -51,10 +51,15 @@ Three formats need more than a regular expression and live in `extension/url-rul
   conservative checks are accepted.
 
 Learning is stored in the browser profile's local extension storage, up to 4,096 records and 2 MiB, so it survives
-browser restarts and updates. A record is dropped once no tab in a normal window needs it. Restored records are checked
-against open tabs before use, once the browser lists tabs: a starting browser starts its extensions before it restores
-its windows, and then restores them all at once. Sign-in and authentication pages, addresses carrying tokens and private
-windows are never learned. Nothing is synced.
+browser restarts and updates. A record is dropped once no tab in a normal window needs it, and a redirect from an address
+is forgotten once a navigation seen starting there loads that address itself. Restored records are checked against open
+tabs before use, once the browser lists a web page: a starting browser starts its extensions before it restores its
+windows, and then restores them all at once, so a new tab page alone isn't the restored session. Sign-in and
+authentication pages, addresses carrying tokens and private windows are never learned. Nothing is synced.
+
+Private browsing is invisible to Link Reuse: its page scripts do nothing in a private window, and the background ignores
+private tabs' messages and navigation. Chromium never runs the extension there; Safari can, so there each tab is checked
+before its events reach learning.
 
 Safari reports a cross-site navigation that moves to another web process as failed before it commits, so the observer
 keeps a failed navigation's start until the tab's next start or commit. Chromium reports a start before every commit,
@@ -74,6 +79,8 @@ so there the next start always replaces it.
   its source, or in the most recently used visible window for links from other apps.
 - Sleeping and discarded tabs are selected as they are; the browser wakes them.
 - The match is checked against the live tab again right before acting.
+- Safari lists only tabs on websites it lets the extension see. A link to a website outside that, with nothing found,
+  is reported with how to allow the website, instead of opening a tab that may duplicate one it can't see.
 
 ## Clicks on pages
 
@@ -89,7 +96,8 @@ scripts can act:
   gets nothing, so the browser can let it sleep. A restarted background sends every showing page its list once. The page
   decides at the click itself, before the page or its router sees it. Other links send no message and add no delay. A
   link to the page you're on stays there. The background confirms the match before switching, so a fingerprint collision
-  or a tab that has gone just loads the link normally.
+  or a tab that has gone just loads the link normally. If the switch fails after it began, the page shows a notice
+  instead of also loading the link.
 - Right-click menus, downloads, Shift- and Alt-clicks, synthetic clicks and plain clicks inside frames keep the
   browser's behaviour.
 
@@ -106,19 +114,27 @@ order across reloads.
 
 | Browser | Connection |
 | --- | --- |
-| Chromium on macOS | A native messaging host (a copy of the app's binary) per browser profile, reached over private Unix sockets in `/tmp/link-reuse-<uid>` (directory 0700, files 0600). The app checks the host's executable identity and process start time. |
-| Chromium on Windows | A native messaging host copied to `%LOCALAPPDATA%\Link Reuse\host\<version>`, reached over current-user named pipes. |
+| Chromium on macOS | A native messaging host (a copy of the app's binary) per browser profile, reached over private Unix sockets in `/tmp/link-reuse-<uid>` (directory 0700, files 0600). The app uses only hosts running the installed host file, checked by file identity and process start time. |
+| Chromium on Windows | A native messaging host copied to `%LOCALAPPDATA%\Link Reuse\host\<app version>`, reached over current-user named pipes. The app uses only hosts running this version's copy. |
 | Safari | One WebSocket to the app on `127.0.0.1`, on a random port. The app announces it through Safari's extension messaging with a per-launch HMAC token, and the extension must authenticate before it receives any request. |
 
 - Safari runs the extension with a resident Manifest V2 background page, because native messages cannot reliably wake
   a Manifest V3 one. Chromium uses Manifest V3. Both are built from the same source.
-- Each request belongs to one connection at a time. Creating a tab needs a one-time authorization, so a request that
-  was interrupted is never replayed once it may have created a tab.
+- The extension greets with its version and whether its profile has focus. The app always answers with the version it
+  bundles; an extension of another version loads that one, and the app uses a connection only when the versions match.
+- A link goes to the profile focused last. Connecting isn't focus: among profiles not focused since they connected, the
+  one that connected first gets it.
+- Each request belongs to one connection at a time. Before an app link changes anything (selects, focuses, moves or
+  creates a tab), the extension asks the app for a one-time go-ahead over that connection. Until then the request may
+  move to another connection; after it, a lost answer is reported, never replayed. A tab already selected in the
+  focused window needs no change and no go-ahead.
 - The Safari channel allows 16 clients and 1 MiB per message. When it is full, the oldest connection that hasn't
   authenticated makes room, so idle connections can't keep the extension out.
 - The Mac app is background-only and starts on demand, with no login item or service. It stays running while a supported
-  browser is open. Safari's extension starts it: when the extension starts, it opens the app's
-  `linkreuse://started/safari` address, and the app connects then. Safari takes over a second to pass on the first
+  browser is open. Each browser has its own queue of up to 16 links, so a browser that is slow to connect holds up only
+  its own links, and failures show as messages that hold nothing up. Safari's extension starts the app: when the
+  extension starts, it opens the app's `linkreuse://started/safari` address, and the app sends the connection address
+  to every Safari profile then. Safari takes over a second to pass on the first
   connection, so this way that wait is over before the first link. The app brings Safari forward before handing over a
   link, because Safari's extension calls stall while Safari is in the background.
 - Connection metadata holds process identity and activity time only. Logs never contain URLs, tokens or page content.
@@ -129,16 +145,33 @@ There is never a second way to open the same request. An uncertain result shows 
 a failure can't produce a duplicate.
 
 Nothing in Link Reuse waits on a timer. A link waits as long as the browser takes, and ends only with the extension's
-answer or with an event that settles it: its connection ends, or the browser quits. For a browser that isn't connected,
-the app checks that the extension is installed and enabled there, so a missing extension is reported instead of waited
+answer or with an event that settles it: its connection ends, the browser quits (which also ends the browser's links
+still queued), or the app is replaced. For a Chromium browser that isn't connected, the app checks that the browser can
+start its host and that the extension is installed and enabled there, so either missing is reported instead of waited
 on. Safari takes about a second to answer that, so the app wakes the extension first and asks afterwards: the link is
 already on its way. The app also brings the browser forward: a running browser's front window comes to the front, and
 that focus connects the extension. Only a browser without a window is started, so a link never opens an extra window.
 
-An update's new helper takes over at once. Both installers stop the old helpers only once the new one is in place,
-and each old helper tells its extension it was replaced before it exits: on the Mac when it gets SIGTERM (Safari hears
-it from the app), on Windows when the installer sets the event named after its session. The extension then connects
-to the new helper straight away, however many updates come in a row. A connection that ends any other way, or a
-helper that never connected, waits for the next tab switch, window focus or popup, so a helper that keeps failing
-can't spin. The Mac app ends a helper left from a replaced version when it finds one, so its browser connects to the
-installed one.
+An update's new helper takes over at once. Both installers stop the old version only once the new one is in place.
+On the Mac the installer swaps the new app in, keeps the old one aside until the new one is registered, and finds the
+processes still running the old one by the file they run, which macOS reports from the file itself, so its path follows
+the swap. It sends them SIGUSR1; SIGTERM keeps its usual meaning. Each old helper tells its extension it was replaced
+before it exits (on Windows the installer sets the event named after its session instead), and so does the old app for
+Safari. The extension then connects to the new version straight away, however many updates come in a row. A connection
+that ends any other way, or a helper that never connected, waits for the next tab switch, window focus or popup, so a
+helper that keeps failing can't spin. Finding connections never stops a process.
+
+The old Mac app hands the links it still holds to one new instance of the installed app, in order, through a private
+file the new one removes once it has taken them. A link not yet passed to its browser opens there; one that may have
+been is reported there for you to check. If the new instance can't take them, the old one lists them. A link that
+reaches the old app after the hand-over has begun is reported, to open again.
+
+### Known limits
+
+- **Edge restoring its session.** A link that arrives while Edge is still starting can open a tab before Edge restores
+  the previous session, which may bring back a tab for the same page. Edge starts extensions before it restores windows
+  and gives no event for the restore being done.
+- **A Chromium browser whose extension never connects** (for example, enabled only in a profile that isn't open) holds
+  its links until it connects or quits. The extension's `!` badge shows the reason where the extension runs.
+- **Safari not answering.** If Safari's extension is enabled but never connects, a Safari link waits until it does,
+  Safari quits or the app is replaced. Turning the extension off later isn't noticed while it waits.

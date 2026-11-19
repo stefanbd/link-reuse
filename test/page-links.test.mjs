@@ -10,7 +10,7 @@ const settle = () => new Promise(setImmediate);
 
 // keys: the match keys of other tabs, which the extension sends the page as fingerprints when it asks. here: its address.
 function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], baseTarget, broken = false, framed = false,
-  hidden = false, here = 'https://example.test/here' } = {}) {
+  hidden = false, here = 'https://example.test/here', incognito = false } = {}) {
   const listeners = new Map(), sent = [], notices = [], skips = [], assigned = [], requests = [];
   let messageListener;
   const node = () => ({ style: {}, setAttribute() {}, addEventListener() {}, append() {}, remove() {} });
@@ -32,7 +32,7 @@ function harness({ platform = 'win', reply = { result: 'focused' }, keys = [], b
   };
   const window = { addEventListener(type, fn) { listeners.set(type, fn); } };
   window.top = framed ? {} : window;
-  const context = vm.createContext({ chrome: { runtime }, document, URL, TextEncoder, TextDecoder, atob, window,
+  const context = vm.createContext({ chrome: { runtime, extension: { inIncognitoContext: incognito } }, document, URL, TextEncoder, TextDecoder, atob, window,
     navigator: { platform: platform === 'mac' ? 'MacIntel' : 'Win32' },
     location: { href: here, assign: url => assigned.push(url) } });
   vm.runInContext(rulesSource, context);
@@ -175,7 +175,7 @@ test('a link matches by the same keys the background uses: normalized URL or ide
   }
 });
 
-test('the switch has no time limit; if the tab is gone by then, or the extension fails, the link loads here', async () => {
+test('the switch has no time limit; only an answer that nothing changed loads the link here', async () => {
   // However long a slow browser takes, nothing happens until the answer.
   let answer;
   const slow = harness({ keys: ['https://example.test/item'], reply: new Promise(resolve => { answer = resolve; }) });
@@ -186,14 +186,30 @@ test('the switch has no time limit; if the tab is gone by then, or the extension
   answer({ result: 'focused' });
   await settle();
   assert.deepEqual(slow.assigned, []);
-  for (const reply of [{ result: 'none' }, { error: 'The matching tab changed. Please open the link again.' }, null, new Error('Connection closed.')]) {
+  assert.equal(slow.notices.length, 0);
+  // The tab was gone by then: nothing changed, so the page loads the link itself.
+  const gone = harness({ keys: ['https://example.test/item'], reply: { result: 'none' } });
+  await settle();
+  assert.equal(gone.click().cancelled, true);
+  await settle();
+  assert.deepEqual(gone.assigned, ['https://example.test/item']);
+  assert.equal(gone.notices.length, 0);
+  // A failure or a lost answer may come after the switch began: loading here too could show the page twice.
+  for (const reply of [{ error: 'The window could not be focused.' }, null, new Error('Connection closed.')]) {
     const h = harness({ keys: ['https://example.test/item'], reply });
     await settle();
     assert.equal(h.click().cancelled, true);
     await settle();
-    assert.deepEqual(h.assigned, ['https://example.test/item'], JSON.stringify(reply));
-    assert.equal(h.notices.length, 0);
+    assert.deepEqual(h.assigned, [], JSON.stringify(reply));
+    assert.equal(h.notices.length, 1);
   }
+});
+
+test('a private window\'s pages are left entirely to the browser', async () => {
+  const h = harness({ incognito: true, keys: ['https://example.test/item'] });
+  await settle();
+  assert.equal(h.listeners.size, 0);
+  assert.deepEqual(h.requests, []);
 });
 
 test('a plain link no other tab shows is left alone, with no message at all', async () => {

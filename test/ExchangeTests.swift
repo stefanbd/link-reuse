@@ -66,6 +66,38 @@ struct ExchangeTests {
         do { _ = try await authorized.value; preconditionFailure("Uncertain creation was replayed") }
         catch let error as POSIXError { precondition(error.code == .EPIPE) }
 
+        // The router can take a link back until the go-ahead: then the go-ahead is refused.
+        let withdrawn = Task { try await exchange.request("https://example.test/withdrawn") { false } }
+        guard let withdrawnID = await deliveries.next().id else { preconditionFailure() }
+        check(await exchange.claim(withdrawnID, profile: "creator"))
+        check(!(await exchange.authorizeCreation(withdrawnID, profile: "creator")))
+        check(await exchange.receive(BridgeMessage(type: "result", id: withdrawnID, error: "refused", profile: "creator")))
+        let refused = try await withdrawn.value
+        precondition(refused.error == "refused")
+
+        // A failed wake ends only the requests still waiting on it: not one that arrived later, nor one released by a
+        // connection since, which waits on a newer wake.
+        let early = Task { try await exchange.request("https://example.test/early") }
+        guard let earlyID = await deliveries.next().id else { preconditionFailure() }
+        check(await exchange.waiting(on: 1))
+        let later = Task { try await exchange.request("https://example.test/later") }
+        _ = await deliveries.next()
+        check(await exchange.waiting(on: 2))
+        check(!(await exchange.waiting(on: 3)))
+        check(await exchange.claim(earlyID, profile: "brief"))
+        await exchange.disconnected(profile: "brief")
+        check(await exchange.waiting(on: 4))
+        await exchange.wakeFailed(1, error: POSIXError(.EIO))
+        await exchange.wakeFailed(2, error: POSIXError(.EIO))
+        do { _ = try await later.value; preconditionFailure("A request outlived its failed wake") }
+        catch let error as POSIXError { precondition(error.code == .EIO) }
+        let survivors = await exchange.unclaimed()
+        precondition(survivors.map(\.id) == [earlyID])
+        check(await exchange.claim(earlyID, profile: "next"))
+        check(await exchange.receive(BridgeMessage(type: "result", id: earlyID, result: "opened", profile: "next")))
+        let opened = try await early.value
+        precondition(opened.result == "opened")
+
         let failing = BridgeExchange { _ in throw POSIXError(.ENOENT) }
         do { _ = try await failing.request("https://example.test/item"); preconditionFailure() }
         catch let error as POSIXError { precondition(error.code == .ENOENT) }
@@ -82,7 +114,8 @@ struct ExchangeTests {
             do { _ = try await task.value; preconditionFailure() }
             catch let error as POSIXError { precondition(error.code == .EPIPE) }
         }
-        print("Shared native acknowledgements, profile claims, late replies, transport failure and 16-request bound passed")
+        print("Shared native acknowledgements, profile claims, late replies, withdrawn go-aheads, scoped wake failures, " +
+              "transport failure and 16-request bound passed")
     }
 
     static func check(_ value: Bool) { precondition(value) }
