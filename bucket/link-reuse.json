@@ -1,11 +1,11 @@
 {
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "Reuse an existing browser tab before opening an external web link.",
   "homepage": "https://github.com/stefanbd/link-reuse",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/stefanbd/link-reuse/releases/download/windows-v0.1.28/link-reuse-windows-x64-0.1.28.zip",
-      "hash": "dc184110cc882e56899a5a8348d03c19d3049df83ca32ad8bf8b9b070b646df8"
+      "url": "https://github.com/stefanbd/link-reuse/releases/download/windows-v0.1.29/link-reuse-windows-x64-0.1.29.zip",
+      "hash": "99144934c185167b1c3ecfeb851a02bf08a683a77da9227e1c07d16e1bedded2"
     }
   },
   "bin": [
