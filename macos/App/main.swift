@@ -1,58 +1,57 @@
 import AppKit
-import Synchronization
-
-/// Whether a link has been passed to its browser: written to a Chromium host, or given the go-ahead Safari's extension
-/// asks for. Passing it and handing it to a replacing instance race; whichever comes first wins, so a link is never
-/// both opened here and handed on.
-final class Passing: Sendable {
-    private let state = Mutex<Bool?>(nil)
-    func pass() -> Bool { state.withLock { if $0 == nil { $0 = true }; return $0 == true } }
-    func handOver() -> Bool { state.withLock { if $0 == nil { $0 = false }; return $0 == false } }
-    var passed: Bool { state.withLock { $0 == true } }
-}
 
 /// One browser's links, opened one at a time in the order they came; the first is the one being opened. A browser
 /// that is slow to connect holds up only its own links.
 @MainActor
 final class Lane {
+    let browser: BrowserConfiguration
     var links: [OpenRequest] = []
-    var passing = Passing()
     var running: Task<Void, Never>?
     /// For a Chromium browser: the wait for its extension to connect, for the first link.
     var connecting: Task<[BridgeSession], Error>?
-}
+    /// While the version this one replaces still hands this browser's links over: none opens yet, and the handed-over
+    /// ones (the first `inherited`) go ahead of links that came here directly.
+    var held = false
+    var inherited = 0
 
-/// A link a replaced instance hands to the one that replaces it: to open there or, if it may have opened, to report.
-struct Handed: Codable {
-    let browser: String
-    let url: String
-    let uncertain: Bool
+    init(_ browser: BrowserConfiguration) { self.browser = browser }
 }
 
 /// The link router: receives links from other apps and hands each one to its browser's extension.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// `serving` until an installer replaces this version. Then `retiring`: it passes no link on, the links its browsers
+    /// may already be acting on finish, and every untouched one goes to the new version. Then `retired`: it ends once its
+    /// messages are read.
+    private enum Phase { case serving, retiring, retired }
+
     private let resources: AppResources
     private var lanes: [String: Lane] = [:]
     /// The connection to Safari's extension; a new one replaces it if its listener fails.
     private var safari: Task<SafariBridge, any Error>?
-    private var watchers: [any DispatchSourceProtocol] = []
+    private var replacement: (any DispatchSourceSignal)?
     private var alerts: [NSAlert] = []
-    /// An installer replaced this version: it takes no more links, and ends once it has handed on what it held.
-    private var retiring = false
-    private var handedOver = false
+    private var phase = Phase.serving
+    /// Once retiring: the new version, which takes the untouched links.
+    private var successor: Result<Successor, any Error>?
+    /// While the version this one replaces hands its links over.
+    private var takingOver = false
 
-    init(resources: AppResources) { self.resources = resources }
+    init(resources: AppResources) {
+        self.resources = resources
+        super.init()
+        // Started by the version this one replaces: no link opens before it is done with that browser, not even one
+        // that reaches this version first.
+        takingOver = CommandLine.arguments.contains(Successor.argument)
+        if takingOver { for browser in resources.browsers { lane(for: browser).held = true } }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(applicationTerminated(_:)),
             name: NSWorkspace.didTerminateApplicationNotification, object: nil)
-        watchers.append(onReplacement { await self.retire() })
-        let arguments = CommandLine.arguments
-        if let index = arguments.firstIndex(of: "--take-over"), arguments.indices.contains(index + 1) {
-            takeOver(URL(filePath: arguments[index + 1]))
-        }
+        replacement = onReplacement { await self.retire() }
+        if takingOver { takeOver() }
         terminateIfUnused()
     }
 
@@ -63,9 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let browser = resources.browsers.first(where: { $0.bundleID == app?.bundleIdentifier }) else { return }
         if let lane = lanes[browser.id], !lane.links.isEmpty {
             let quit = failure("\(browser.name) quit before Link Reuse could open the link.")
-            let unsent = Array(lane.links.dropFirst())
-            if !unsent.isEmpty { report(quit, for: unsent, uncertain: false) }
-            lane.links.removeSubrange(1...)
+            let sent = lane.running == nil ? 0 : 1
+            let unsent = Array(lane.links.dropFirst(sent))
+            if !unsent.isEmpty { report(quit, for: unsent) }
+            lane.links.removeSubrange(sent...)
+            lane.inherited = min(lane.inherited, lane.links.count)
             lane.connecting?.cancel()
             if browser.profilePath == nil, let safari { Task { try? await safari.value.end(quit) } }
         }
@@ -78,6 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let making: Task<SafariBridge, any Error>
         if let newer = safari, newer != current { making = newer }
         else {
+            // One started now would miss the retirement.
+            guard phase == .serving else { throw Withdrawn() }
             making = Task { try await SafariBridge(version: resources.extensionVersion) }
             safari = making
         }
@@ -92,12 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first
     }
 
-    /// Ends this instance once nothing needs it: no link waiting, no message open and no supported browser running; or,
-    /// once replaced, when what it held is handed on and its messages are read.
+    /// Ends this instance once nothing needs it: no message open, and no link waiting, hand-over under way or supported
+    /// browser running; or, once retired, when its messages are read.
     private func terminateIfUnused() {
         guard alerts.isEmpty else { return }
-        let unused = retiring ? handedOver :
-            lanes.values.allSatisfy(\.links.isEmpty) && !resources.browsers.contains(where: { running($0) != nil })
+        let unused = switch phase {
+        case .serving: !takingOver && lanes.values.allSatisfy(\.links.isEmpty) &&
+            !resources.browsers.contains(where: { running($0) != nil })
+        case .retiring: false
+        case .retired: true
+        }
         if unused { NSApp.terminate(nil) }
     }
 
@@ -110,51 +117,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            if url == BridgeMessage.safariStarted {
-                // Safari's extension (re)started: send the address, so each of its contexts connects before a link.
-                if !retiring { Task { try? await safariBridge().announce() } }
-            } else if let request = OpenRequest(url, browsers: resources.browsers) {
-                accept(request)
-            } else {
-                alert("Couldn’t open a link", "Link Reuse received an address it doesn’t understand.")
+        for url in urls { receive(url) }
+    }
+
+    /// An address from another app, or one the version this one replaces handed over (`inherited`).
+    private func receive(_ url: URL, inherited: Bool = false) {
+        if url == BridgeMessage.safariStarted {
+            // Safari's extension (re)started: send the address, so each of its contexts connects before a link. Retiring,
+            // the new version does; taking over, it does once the old version is done with Safari.
+            switch phase {
+            case .serving:
+                if !lanes.values.contains(where: { $0.held && $0.browser.profilePath == nil }) {
+                    Task { try? await safariBridge().announce() }
+                }
+            case .retiring: Task { try? await toSuccessor(BridgeMessage(type: "open", url: url.absoluteString)) }
+            case .retired: break
             }
+        } else if let request = OpenRequest(url, browsers: resources.browsers) {
+            accept(request, inherited: inherited)
+        } else {
+            alert("Couldn’t open a link", "Link Reuse received an address it doesn’t understand.")
         }
     }
 
-    /// Queues a link behind its browser's earlier ones.
-    private func accept(_ request: OpenRequest) {
-        guard !retiring else {
-            return report(failure("Link Reuse was being updated. Open the link again."), for: [request], uncertain: false)
+    /// Queues a link behind its browser's earlier ones; a handed-over one goes ahead of those that came here directly.
+    private func accept(_ request: OpenRequest, inherited: Bool = false) {
+        guard phase != .retired else {
+            return report(failure("Link Reuse was being updated. Open the link again."), for: [request])
         }
-        let lane = lanes[request.browser.id] ?? Lane()
-        lanes[request.browser.id] = lane
+        let lane = lane(for: request.browser)
         guard lane.links.count < 16 else {
-            return report(failure("Too many links are waiting for \(request.browser.name)."), for: [request], uncertain: false)
+            return report(failure("Too many links are waiting for \(request.browser.name)."), for: [request])
         }
-        lane.links.append(request)
-        if lane.running == nil { lane.running = Task { await run(lane) } }
+        if inherited, lane.held {
+            lane.links.insert(request, at: lane.inherited)
+            lane.inherited += 1
+        } else {
+            lane.links.append(request)
+        }
+        start(lane)
+    }
+
+    private func lane(for browser: BrowserConfiguration) -> Lane {
+        if let lane = lanes[browser.id] { return lane }
+        let lane = Lane(browser)
+        lanes[browser.id] = lane
+        return lane
+    }
+
+    private func start(_ lane: Lane) {
+        if !lane.held, lane.running == nil { lane.running = Task { await run(lane) } }
     }
 
     private func run(_ lane: Lane) async {
-        while !retiring, let request = lane.links.first {
-            do { try await open(request, in: lane) }
-            catch { if !retiring { report(error, for: [request], uncertain: lane.passing.passed) } }
-            if retiring { break }
-            lane.links.removeFirst()
-            lane.passing = Passing()
-        }
+        repeat {
+            while let request = lane.links.first {
+                do { try await open(request, in: lane) }
+                // A helper an update replaced gave it back untouched: its new helper takes it.
+                catch is Withdrawn where phase == .serving { continue }
+                catch is Withdrawn { await handOver(request) }
+                catch { report(error, for: [request]) }
+                lane.links.removeFirst()
+            }
+            // Retiring, with none of this browser's links left here: the new version may open its links now.
+            if phase == .retiring { try? await toSuccessor(BridgeMessage(type: "release", id: lane.browser.id)) }
+        } while !lane.links.isEmpty
         lane.running = nil
+        finishIfDone()
         terminateIfUnused()
     }
 
+    /// Passes a link on to its browser. Once an update replaces this version it passes nothing on, so it checks again
+    /// after each wait; the link then goes to the new version untouched.
     private func open(_ request: OpenRequest, in lane: Lane) async throws {
-        let browser = request.browser, url = request.url.absoluteString, passing = lane.passing
+        guard phase == .serving else { throw Withdrawn() }
+        let browser = request.browser, url = request.url.absoluteString
         if browser.profilePath == nil {
             // Safari's extension stalls while Safari is in the background, so bring it forward (launching it if
             // needed) before the request. When it is already in front, skip the activation round trip.
-            if running(browser)?.isActive != true { try await show(browser) }
-            _ = try await safariBridge().open(url) { passing.pass() }
+            if running(browser)?.isActive != true {
+                try await show(browser)
+                guard phase == .serving else { throw Withdrawn() }
+            }
+            _ = try await safariBridge().open(url)
         } else {
             var sessions = try MacBridge.sessions(browser: browser.bundleID)
             if sessions.isEmpty {
@@ -170,11 +215,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 try await show(browser)
                 do { sessions = try await connecting.value }
-                catch is CancellationError { throw failure("\(browser.name) quit before Link Reuse could connect to it.") }
+                catch is CancellationError {
+                    // The browser quit, or an update took the link back.
+                    guard running(browser) != nil else {
+                        throw failure("\(browser.name) quit before Link Reuse could connect to it.")
+                    }
+                    throw Withdrawn()
+                }
             }
+            guard phase == .serving else { throw Withdrawn() }
             guard let session = sessions.first else { throw notLoaded(in: browser) }
             // The extension focuses the matching window, which brings the browser forward.
-            _ = try await Task.detached { try MacBridge.send(url, session: session) { passing.pass() } }.value
+            _ = try await Task.detached { try MacBridge.send(url, session: session) }.value
         }
     }
 
@@ -188,95 +240,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "Contents/MacOS/LinkReuse” --install, then open the link again.")
     }
 
-    /// An installer replaced this version: each link it holds goes to one new instance of the installed app, in order.
-    /// A link not yet passed to its browser opens there; one that may have been is reported there, never opened twice.
+    /// An installer replaced this version: it passes no more links on, and starts the new version. Each browser's links
+    /// go to it in order once the link in flight there has finished (and, if this version is itself still taking over,
+    /// once the one before is done with that browser); then the new version may open them.
     private func retire() {
-        guard !retiring else { return }
-        retiring = true
-        var handed: [Handed] = []
-        for lane in lanes.values {
+        guard phase == .serving else { return }
+        phase = .retiring
+        successor = Result {
+            guard let executable = Bundle.main.executableURL else { throw CocoaError(.fileNoSuchFile) }
+            return try Successor(executable)
+        }
+        if let safari { Task { try? await safari.value.retire() } }
+        for browser in resources.browsers {
+            let lane = lane(for: browser)
             lane.connecting?.cancel()
-            for (index, request) in lane.links.enumerated() {
-                handed.append(Handed(browser: request.browser.id, url: request.url.absoluteString,
-                                     uncertain: index == 0 && !lane.passing.handOver()))
-            }
-            lane.links.removeAll()
-        }
-        let safari = safari
-        Task {
-            // Safari's extension connects to the new instance at once.
-            if let safari { try? await safari.value.replaced() }
-            await handOver(handed)
+            start(lane)
         }
     }
 
-    /// Starts the successor with the links in a private file, and ends once it has taken them (it removes the file) or
-    /// can't (it ends first, or never starts): then the links are listed for the user, never passed on again.
-    private func handOver(_ handed: [Handed]) async {
-        guard !handed.isEmpty else { return settle(nil, handed) }
-        let file = MacBridge.directory.appending(path: UUID().uuidString + ".handover")
-        do {
-            try MacBridge.prepare()
-            try JSONEncoder().encode(handed).write(to: file)
-            let descriptor = Darwin.open(file.path, O_EVTONLY)
-            guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            let taken = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: .delete, queue: .main)
-            taken.setEventHandler { MainActor.assumeIsolated { self.settle(file, handed) } }
-            taken.setCancelHandler { close(descriptor) }
-            taken.activate()
-            watchers.append(taken)
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.createsNewApplicationInstance = true
-            configuration.activates = false
-            configuration.addsToRecentItems = false
-            configuration.arguments = ["--take-over", file.path]
-            let successor = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
-            let pid = successor.processIdentifier
-            let ended = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
-            ended.setEventHandler { MainActor.assumeIsolated { self.settle(file, handed) } }
-            ended.activate()
-            watchers.append(ended)
-            // Signal 0 sends nothing: it asks whether the successor still exists, in case it ended before the watch.
-            if kill(pid, 0) != 0 { settle(file, handed) }
-        } catch { settle(file, handed) }
+    /// Gives an untouched link to the new version; it stays this version's until the new one has taken it.
+    private func handOver(_ request: OpenRequest) async {
+        do { try await toSuccessor(BridgeMessage(type: "open", url: request.envelope.absoluteString)) }
+        catch { report(error, for: [request]) }
     }
 
-    private func settle(_ file: URL?, _ handed: [Handed]) {
-        guard !handedOver else { return }
-        handedOver = true
-        if let file, FileManager.default.fileExists(atPath: file.path) {
-            try? FileManager.default.removeItem(at: file)
-            alert("Link Reuse was updated while links were waiting",
-                  "The new version couldn’t take them. Check whether these opened before opening them again:\n" +
-                  handed.map(\.url).joined(separator: "\n"))
+    private func toSuccessor(_ message: BridgeMessage) async throws {
+        guard case .success(let next)? = successor else { throw Successor.notTaken() }
+        try await next.hand(message)
+    }
+
+    /// Retiring, once every browser's links are handed over: the hand-over ends, so the new version opens all it took,
+    /// and this one ends once its messages are read.
+    private func finishIfDone() {
+        guard phase == .retiring, !takingOver, lanes.values.allSatisfy({ $0.running == nil && !$0.held }) else { return }
+        phase = .retired
+        if case .success(let next)? = successor { next.close() }
+    }
+
+    /// Started by the version this one replaces, with a private connection as standard input and output: each link it
+    /// hands over joins its browser's lane ahead of links that came here directly, and is answered `taken`. A browser's
+    /// links open once the old version is done with that browser, and all of them once the connection ends.
+    private func takeOver() {
+        Thread.detachNewThread {
+            Successor.receive { message in DispatchQueue.main.sync { MainActor.assumeIsolated { self.handed(message) } } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.tookOver() } }
         }
+    }
+
+    private func handed(_ message: BridgeMessage) {
+        if message.type == "release" {
+            if let lane = lanes[message.id ?? ""] { release(lane) }
+        } else if let url = message.url.flatMap(URL.init(string:)) {
+            receive(url, inherited: true)
+        } else {
+            alert("Couldn’t open a link", "Link Reuse received an address it doesn’t understand.")
+        }
+    }
+
+    private func tookOver() {
+        takingOver = false
+        for lane in lanes.values { release(lane) }
+        finishIfDone()
         terminateIfUnused()
     }
 
-    /// Takes the links a replaced instance handed over, then removes their file, which tells it they are taken.
-    private func takeOver(_ file: URL) {
-        guard file.deletingLastPathComponent().path == MacBridge.directory.path, file.pathExtension == "handover" else { return }
-        defer { try? FileManager.default.removeItem(at: file) }
-        guard let data = try? Data(contentsOf: file), let handed = try? JSONDecoder().decode([Handed].self, from: data) else {
-            return alert("Link Reuse was updated while links were waiting", "It couldn’t take them over. Check whether they opened.")
+    /// The version this one replaces is done with a browser: its links open now, the handed-over ones first. Safari's
+    /// extension is sent this version's address, so it moves over at once.
+    private func release(_ lane: Lane) {
+        guard lane.held else { return }
+        lane.held = false
+        lane.inherited = 0
+        if phase == .serving, lane.browser.profilePath == nil, running(lane.browser) != nil {
+            Task { try? await safariBridge().announce() }
         }
-        for item in handed {
-            guard let browser = resources.browsers.first(where: { $0.id == item.browser }), isWebLink(item.url),
-                  let url = URL(string: item.url) else {
-                alert("Couldn’t open a link", "Link Reuse was updated while \(item.url) waited, and can no longer open it.")
-                continue
-            }
-            let request = OpenRequest(browser: browser, url: url)
-            if item.uncertain { report(failure("Link Reuse was updated while opening it."), for: [request], uncertain: true) }
-            else { accept(request) }
-        }
+        start(lane)
     }
 
-    private func report(_ error: Error, for requests: [OpenRequest], uncertain: Bool) {
+    private func report(_ error: Error, for requests: [OpenRequest]) {
         guard let browser = requests.first?.browser else { return }
-        alert(requests.count == 1 ? "Couldn’t open the link in \(browser.name)" :
-                "Couldn’t open \(requests.count) links in \(browser.name)",
-              error.localizedDescription + (uncertain ? " Check whether the link opened before trying again." : ""))
+        alert(requests.count == 1 ? "Problem opening the link in \(browser.name)" :
+                "Problem opening \(requests.count) links in \(browser.name)", error.localizedDescription)
     }
 
     /// Shows a message without holding anything up. The app, otherwise invisible, shows itself while one is open.

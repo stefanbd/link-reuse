@@ -9,6 +9,16 @@ struct OpenRequest: Equatable, Sendable {
         self.url = url
     }
 
+    /// The address the link arrives by, which `init?(_:browsers:)` reads.
+    var envelope: URL {
+        var components = URLComponents()
+        components.scheme = "linkreuse"
+        components.host = "open"
+        components.path = "/" + browser.id
+        components.percentEncodedQuery = "url=" + url.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        return components.url!
+    }
+
     init?(_ envelope: URL, browsers: [BrowserConfiguration]) {
         guard let components = URLComponents(url: envelope, resolvingAgainstBaseURL: false),
               components.scheme == "linkreuse", components.host == "open",

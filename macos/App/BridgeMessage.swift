@@ -27,3 +27,11 @@ struct BridgeMessage: Codable, Sendable {
 func failure(_ message: String) -> NSError {
     NSError(domain: "LinkReuse", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
 }
+
+/// A link given back untouched by a process an update is replacing: it can safely open elsewhere.
+struct Withdrawn: Error {}
+
+/// The connection ended after the extension may have acted on the link.
+func connectionLost() -> NSError {
+    failure("The browser connection ended while opening the link. Check whether it opened before trying again.")
+}

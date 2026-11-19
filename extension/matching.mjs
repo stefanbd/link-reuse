@@ -268,7 +268,8 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
     : (await browser.windows.create({ url, incognito: false, type: 'normal', focused: true })).tabs?.[0];
   learning.rememberLaunch(created?.id, request);
   learning.rememberCreated(created?.id, url);
-  if (window && active) await activateWindow(window.id);
+  // The tab is open either way: a window that won't come forward isn't a failure, which would invite opening it twice.
+  if (window && active) await activateWindow(window.id).catch(() => {});
   return { result: 'opened' };
 }
 

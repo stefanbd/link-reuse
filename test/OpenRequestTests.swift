@@ -20,7 +20,9 @@ struct OpenRequestTests {
                 let encoded = context.evaluateScript("url.href")!.toString()!
                 let request = OpenRequest(URL(string: encoded)!, browsers: browsers)
                 precondition(request?.browser == browser && request?.url == URL(string: value))
-                checks += 1
+                // The same address carries a link from one version of the app to the next.
+                if let request { precondition(OpenRequest(request.envelope, browsers: browsers) == request) }
+                checks += 2
             }
         }
         let rejected = ["https://example.test", "linkreuse://open/Unknown?url=https%3A%2F%2Fexample.test",

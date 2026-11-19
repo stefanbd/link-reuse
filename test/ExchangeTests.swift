@@ -64,39 +64,7 @@ struct ExchangeTests {
         await exchange.disconnected(profile: "creator")
         check((await exchange.unclaimed()).isEmpty)
         do { _ = try await authorized.value; preconditionFailure("Uncertain creation was replayed") }
-        catch let error as POSIXError { precondition(error.code == .EPIPE) }
-
-        // The router can take a link back until the go-ahead: then the go-ahead is refused.
-        let withdrawn = Task { try await exchange.request("https://example.test/withdrawn") { false } }
-        guard let withdrawnID = await deliveries.next().id else { preconditionFailure() }
-        check(await exchange.claim(withdrawnID, profile: "creator"))
-        check(!(await exchange.authorizeCreation(withdrawnID, profile: "creator")))
-        check(await exchange.receive(BridgeMessage(type: "result", id: withdrawnID, error: "refused", profile: "creator")))
-        let refused = try await withdrawn.value
-        precondition(refused.error == "refused")
-
-        // A failed wake ends only the requests still waiting on it: not one that arrived later, nor one released by a
-        // connection since, which waits on a newer wake.
-        let early = Task { try await exchange.request("https://example.test/early") }
-        guard let earlyID = await deliveries.next().id else { preconditionFailure() }
-        check(await exchange.waiting(on: 1))
-        let later = Task { try await exchange.request("https://example.test/later") }
-        _ = await deliveries.next()
-        check(await exchange.waiting(on: 2))
-        check(!(await exchange.waiting(on: 3)))
-        check(await exchange.claim(earlyID, profile: "brief"))
-        await exchange.disconnected(profile: "brief")
-        check(await exchange.waiting(on: 4))
-        await exchange.wakeFailed(1, error: POSIXError(.EIO))
-        await exchange.wakeFailed(2, error: POSIXError(.EIO))
-        do { _ = try await later.value; preconditionFailure("A request outlived its failed wake") }
-        catch let error as POSIXError { precondition(error.code == .EIO) }
-        let survivors = await exchange.unclaimed()
-        precondition(survivors.map(\.id) == [earlyID])
-        check(await exchange.claim(earlyID, profile: "next"))
-        check(await exchange.receive(BridgeMessage(type: "result", id: earlyID, result: "opened", profile: "next")))
-        let opened = try await early.value
-        precondition(opened.result == "opened")
+        catch { check(lost(error)) }
 
         let failing = BridgeExchange { _ in throw POSIXError(.ENOENT) }
         do { _ = try await failing.request("https://example.test/item"); preconditionFailure() }
@@ -112,11 +80,34 @@ struct ExchangeTests {
         await exchange.finish()
         for task in waiting {
             do { _ = try await task.value; preconditionFailure() }
-            catch let error as POSIXError { precondition(error.code == .EPIPE) }
+            catch { check(lost(error)) }
         }
-        print("Shared native acknowledgements, profile claims, late replies, withdrawn go-aheads, scoped wake failures, " +
-              "transport failure and 16-request bound passed")
+
+        // An update replacing the app: a request the extension may be acting on (it has the go-ahead) finishes; the
+        // others are given back untouched, the extension is refused the go-ahead for them, and no new one is taken.
+        let retiring = BridgeExchange { await deliveries.send($0) }
+        let acting = Task { try await retiring.request("https://example.test/acting") }
+        guard let actingID = await deliveries.next().id else { preconditionFailure() }
+        check(await retiring.claim(actingID, profile: "creator"))
+        check(await retiring.authorizeCreation(actingID, profile: "creator"))
+        let held = Task { try await retiring.request("https://example.test/held") }
+        guard let heldID = await deliveries.next().id else { preconditionFailure() }
+        check(await retiring.claim(heldID, profile: "creator"))
+        let free = Task { try await retiring.request("https://example.test/unclaimed") }
+        _ = await deliveries.next()
+        await retiring.retire()
+        for task in [held, free] {
+            do { _ = try await task.value; preconditionFailure("A request stayed after retirement") } catch is Withdrawn {}
+        }
+        check(!(await retiring.authorizeCreation(heldID, profile: "creator")))
+        check(await retiring.receive(BridgeMessage(type: "result", id: actingID, result: "opened", profile: "creator")))
+        let acted = try await acting.value
+        precondition(acted.result == "opened")
+        do { _ = try await retiring.request("https://example.test/late"); preconditionFailure() } catch is Withdrawn {}
+        print("Shared native acknowledgements, profile claims, late replies, lost connections, transport failure, " +
+              "16-request bound and retirement passed")
     }
 
     static func check(_ value: Bool) { precondition(value) }
+    static func lost(_ error: any Error) -> Bool { error.localizedDescription == connectionLost().localizedDescription }
 }

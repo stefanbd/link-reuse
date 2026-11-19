@@ -145,26 +145,37 @@ There is never a second way to open the same request. An uncertain result shows 
 a failure can't produce a duplicate.
 
 Nothing in Link Reuse waits on a timer. A link waits as long as the browser takes, and ends only with the extension's
-answer or with an event that settles it: its connection ends, the browser quits (which also ends the browser's links
-still queued), or the app is replaced. For a Chromium browser that isn't connected, the app checks that the browser can
+answer or with an event that settles it: its connection ends, or the browser quits (which also ends the browser's links
+still queued). An update moves the links that haven't had the go-ahead to the new version instead. For a Chromium browser that isn't connected, the app checks that the browser can
 start its host and that the extension is installed and enabled there, so either missing is reported instead of waited
 on. Safari takes about a second to answer that, so the app wakes the extension first and asks afterwards: the link is
 already on its way. The app also brings the browser forward: a running browser's front window comes to the front, and
 that focus connects the extension. Only a browser without a window is started, so a link never opens an extra window.
 
-An update's new helper takes over at once. Both installers stop the old version only once the new one is in place.
-On the Mac the installer swaps the new app in, keeps the old one aside until the new one is registered, and finds the
-processes still running the old one by the file they run, which macOS reports from the file itself, so its path follows
-the swap. It sends them SIGUSR1; SIGTERM keeps its usual meaning. Each old helper tells its extension it was replaced
-before it exits (on Windows the installer sets the event named after its session instead), and so does the old app for
-Safari. The extension then connects to the new version straight away, however many updates come in a row. A connection
-that ends any other way, or a helper that never connected, waits for the next tab switch, window focus or popup, so a
-helper that keeps failing can't spin. Finding connections never stops a process.
+An update's new version takes over at once, and no link opens twice or goes missing on the way. Both installers stop
+the old version only once the new one is in place. On the Mac the installer swaps the new app in, keeps the old one
+aside until the new one is registered, and finds the processes still running the old one by the file they run, which
+macOS reports from the file itself, so its path follows the swap. It sends them SIGUSR1; SIGTERM keeps its usual
+meaning. From then on an old process gives no go-ahead: each link its extension hasn't had the go-ahead for goes back
+untouched, and each one the extension may be acting on finishes where it is.
 
-The old Mac app hands the links it still holds to one new instance of the installed app, in order, through a private
-file the new one removes once it has taken them. A link not yet passed to its browser opens there; one that may have
-been is reported there for you to check. If the new instance can't take them, the old one lists them. A link that
-reaches the old app after the hand-over has begun is reported, to open again.
+- **An old Chromium helper** stops being found (it removes its session and closes its socket), gives the links it holds
+  back to the app (`withdrawn`), and once every link the app passed it has its answer, tells its extension it was
+  replaced and exits. The extension connects to the new helper straight away, and the app passes the links there. On
+  Windows the installer sets the event named after the helper's session instead.
+- **The old Mac app** starts the new one itself, with one end of a private socket pair as its standard input and
+  output. The connection exists before the new app runs and ends when either one does, so each learns every outcome
+  from it, with no file or watcher. Once the link a browser may be acting on has finished, the old app hands over that
+  browser's other links in order, one at a time, and tells the new app it is done with that browser. The new app
+  answers each link once it has queued it, ahead of links that reached it directly, and opens a browser's links only
+  once the old app is done with that browser. For Safari it then sends the extension its own address, which ends the
+  old connection. A link the new app stopped while taking may have opened, so it is reported for you to check; one it
+  never got is reported to open again. A link that reaches the old app during the hand-over joins it, and one that
+  arrives after is reported to open again.
+
+The extension connects to the new version straight away, however many updates come in a row. A connection that ends
+any other way, or a helper that never connected, waits for the next tab switch, window focus or popup, so a helper that
+keeps failing can't spin. Finding connections never stops a process.
 
 ### Known limits
 
@@ -173,5 +184,5 @@ reaches the old app after the hand-over has begun is reported, to open again.
   and gives no event for the restore being done.
 - **A Chromium browser whose extension never connects** (for example, enabled only in a profile that isn't open) holds
   its links until it connects or quits. The extension's `!` badge shows the reason where the extension runs.
-- **Safari not answering.** If Safari's extension is enabled but never connects, a Safari link waits until it does,
-  Safari quits or the app is replaced. Turning the extension off later isn't noticed while it waits.
+- **Safari not answering.** If Safari's extension is enabled but never connects, a Safari link waits until it does
+  or Safari quits; an update moves it to the new version, where it waits again. Turning the extension off later isn't noticed while it waits.

@@ -480,6 +480,13 @@ test('opening with no browser windows creates one without a last-focused query',
   assert.equal(h.calls[0][0], 'create-window');
 });
 
+test('a new tab whose window will not come forward still counts as opened, so nothing invites opening it twice', async () => {
+  const h = browser([{ url: 'https://example.test/other', active: true }], [{ id: 1, focused: false, state: 'normal' }]);
+  h.api.windows.update = async () => { throw new Error('The window stayed behind'); };
+  assert.deepEqual(await routeToTab('https://example.test/new', new LiveLearning(policy), h.api), { result: 'opened' });
+  assert.equal(h.calls.filter(([kind]) => kind === 'create').length, 1);
+});
+
 test('a tab that navigates during concurrent window lookup still fails final revalidation', async () => {
   const h = browser([{ url: photo, active: false }]);
   let release;

@@ -138,19 +138,104 @@ enum MacBridge {
         _ = setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    /// Passes a link to a browser's host. `pass` is asked right before the write: whether the link is still this app's.
-    static func send(_ url: String, session: BridgeSession, pass: () -> Bool = { true }) throws -> String {
-        let socket = try descriptor(path: session.socket, listen: false)
+    /// Passes a link to a browser's host. A host it never reached, or one an update is replacing, leaves the link untouched
+    /// (`Withdrawn`), so it can go elsewhere. Once the link may have reached the host, only the host's answer settles it.
+    static func send(_ url: String, session: BridgeSession) throws -> String {
+        guard let socket = try? descriptor(path: session.socket, listen: false) else { throw Withdrawn() }
         let stream = FileHandle(fileDescriptor: socket, closeOnDealloc: true)
         defer { try? stream.close() }
-        guard pass() else { throw CancellationError() }
-        try Wire.writeFrame(JSONEncoder().encode(BridgeMessage(type: "open", url: url)), to: stream)
-        guard let data = try Wire.readFrame(from: stream) else { throw POSIXError(.EIO) }
-        let reply = try JSONDecoder().decode(BridgeMessage.self, from: data)
+        let reply: BridgeMessage
+        do {
+            try Wire.writeFrame(JSONEncoder().encode(BridgeMessage(type: "open", url: url)), to: stream)
+            guard let data = try Wire.readFrame(from: stream) else { throw connectionLost() }
+            reply = try JSONDecoder().decode(BridgeMessage.self, from: data)
+        } catch { throw connectionLost() }
+        if reply.type == "withdrawn" { throw Withdrawn() }
         if let error = reply.error { throw failure(error) }
         guard reply.type == "result", let result = reply.result, ["focused", "opened"].contains(result) else {
-            throw POSIXError(.EINVAL)
+            throw connectionLost()
         }
         return result
+    }
+}
+
+/// The hand-over to the new version an installer put in place. The old version starts it with one end of a private
+/// connection as its standard input and output, so the connection exists before the new version runs and ends when
+/// either one does: each side learns every outcome from it, with nothing to watch or clean up. The new version says it
+/// is `ready`, then answers `taken` to each message once it has it. One message is on its way at a time.
+final class Successor: Sendable {
+    private let channel: FileHandle
+    private let queue = DispatchQueue(label: "me.dichev.LinkReuse.successor")
+
+    init(_ executable: URL) throws {
+        var ends: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &ends) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        for end in ends {
+            MacBridge.configure(end)
+            // Only the new version gets its end, as standard input and output; nothing it starts inherits either.
+            _ = fcntl(end, F_SETFD, FD_CLOEXEC)
+        }
+        channel = FileHandle(fileDescriptor: ends[0], closeOnDealloc: true)
+        let theirs = FileHandle(fileDescriptor: ends[1], closeOnDealloc: true)
+        defer { try? theirs.close() }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = [Self.argument]
+        process.standardInput = theirs
+        process.standardOutput = theirs
+        try process.run()
+        // Nothing is handed over before the new version is ready; if it never is, every hand-over fails unsent.
+        queue.async { [channel] in
+            if (try? Self.read(channel))?.type != "ready" { _ = shutdown(channel.fileDescriptor, SHUT_RDWR) }
+        }
+    }
+
+    /// Hands a message over and returns once the new version has taken it.
+    func hand(_ message: BridgeMessage) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            queue.async { [channel] in
+                continuation.resume(with: Result {
+                    do { try Wire.writeFrame(JSONEncoder().encode(message), to: channel) } catch { throw Self.notTaken() }
+                    guard (try? Self.read(channel))?.type == "taken" else { throw Self.uncertain() }
+                })
+            }
+        }
+    }
+
+    /// Ends the hand-over: the new version opens everything it took.
+    func close() { _ = shutdown(channel.fileDescriptor, SHUT_RDWR) }
+
+    /// What the new version is started with.
+    static let argument = "--take-over"
+
+    /// The new version's side: says it is ready, then gives `take` each message handed over and answers `taken` once it
+    /// returns. Returns when the old version ends the hand-over, or ends.
+    static func receive(_ take: (BridgeMessage) -> Void) {
+        // Nothing this version starts inherits the connection.
+        for descriptor in [STDIN_FILENO, STDOUT_FILENO] { _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC) }
+        var connected = answer("ready")
+        while connected, let message = try? read(.standardInput) {
+            take(message)
+            connected = answer("taken")
+        }
+    }
+
+    private static func answer(_ type: String) -> Bool {
+        (try? Wire.writeFrame(JSONEncoder().encode(BridgeMessage(type: type)), to: .standardOutput)) != nil
+    }
+
+    private static func read(_ channel: FileHandle) throws -> BridgeMessage? {
+        try Wire.readFrame(from: channel).map { try JSONDecoder().decode(BridgeMessage.self, from: $0) }
+    }
+
+    /// The new version never got the link.
+    static func notTaken() -> NSError {
+        failure("Link Reuse was updated while the link waited, and the new version couldn’t take it. Open it again.")
+    }
+
+    /// The new version ended while taking the link: it may have opened it.
+    static func uncertain() -> NSError {
+        failure("Link Reuse was updated while the link waited, and the new version stopped while taking it. " +
+                "Check whether it opened before trying again.")
     }
 }

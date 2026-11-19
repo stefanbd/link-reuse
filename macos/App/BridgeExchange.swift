@@ -2,36 +2,33 @@ import Foundation
 import Darwin
 
 /// The requests waiting on the extension. Each ends with the extension's answer, or when what carries it ends: its
-/// connection, or the browser. Before the extension's one-time go-ahead (`authorize-create`) a request has changed
-/// nothing, so a connection that ends releases it for another; after it, a lost answer is an error, never a replay.
+/// connection, or the browser. A request is held until the extension's one-time go-ahead (`authorize-create`), the only
+/// step that lets it change a tab. A held request whose connection ends is released for another; after the go-ahead, a
+/// lost answer is an error, never a replay.
 actor BridgeExchange {
     private struct Pending {
         let continuation: CheckedContinuation<BridgeMessage, Error>
         let message: BridgeMessage
-        let arrival: UInt64
-        /// Asked at the go-ahead: whether the link is still this app's to pass on.
-        let pass: @Sendable () -> Bool
         var profile: String?
-        /// The Safari wake the request waits on while no extension context is connected.
-        var wake: UInt64?
         var granted = false
     }
 
     private let deliver: @Sendable (BridgeMessage) async throws -> Void
     private var pending: [String: Pending] = [:]
-    private var arrivals: UInt64 = 0
+    /// An update is replacing this process: it gives no more go-aheads.
+    private var retired = false
 
     init(deliver: @escaping @Sendable (BridgeMessage) async throws -> Void) { self.deliver = deliver }
 
     func send(_ message: BridgeMessage) async throws { try await deliver(message) }
 
-    func request(_ url: String, pass: @escaping @Sendable () -> Bool = { true }) async throws -> BridgeMessage {
+    func request(_ url: String) async throws -> BridgeMessage {
+        guard !retired else { throw Withdrawn() }
         guard pending.count < 16 else { throw POSIXError(.EBUSY) }
         let id = UUID().uuidString
-        arrivals += 1
         return try await withCheckedThrowingContinuation { continuation in
             let message = BridgeMessage(type: "open", id: id, url: url)
-            pending[id] = Pending(continuation: continuation, message: message, arrival: arrivals, pass: pass)
+            pending[id] = Pending(continuation: continuation, message: message)
             Task {
                 do { try await send(message) }
                 catch { fail(id, error: error) }
@@ -39,24 +36,19 @@ actor BridgeExchange {
         }
     }
 
-    /// The requests no connection holds, oldest first.
-    func unclaimed() -> [BridgeMessage] {
-        pending.values.filter { $0.profile == nil }.sorted { $0.arrival < $1.arrival }.map(\.message)
-    }
+    /// The requests no connection holds.
+    func unclaimed() -> [BridgeMessage] { pending.values.filter { $0.profile == nil }.map(\.message) }
 
     func claim(_ id: String, profile: String) -> Bool {
-        guard var request = pending[id], request.profile == nil else { return false }
-        request.profile = profile
-        request.wake = nil
-        pending[id] = request
+        guard let request = pending[id], request.profile == nil else { return false }
+        pending[id]?.profile = profile
         return true
     }
 
-    /// The go-ahead, given once, to the connection holding the request, and only while the link is still this app's.
+    /// The go-ahead, given once, to the connection holding the request.
     func authorizeCreation(_ id: String, profile: String?) -> Bool {
-        guard var request = pending[id], request.profile == profile, !request.granted, request.pass() else { return false }
-        request.granted = true
-        pending[id] = request
+        guard let request = pending[id], request.profile == profile, !request.granted else { return false }
+        pending[id]?.granted = true
         return true
     }
 
@@ -64,37 +56,37 @@ actor BridgeExchange {
     func receive(_ message: BridgeMessage) -> Bool {
         guard message.type == "result", let id = message.id, let request = pending[id],
               request.profile == message.profile else { return false }
-        pending.removeValue(forKey: id)?.continuation.resume(returning: message)
+        end(id, with: .success(message))
         return true
     }
 
-    func fail(_ id: String, error: any Error) { pending.removeValue(forKey: id)?.continuation.resume(throwing: error) }
+    func fail(_ id: String, error: any Error) { end(id, with: .failure(error)) }
 
-    func finish(_ error: any Error = POSIXError(.EPIPE)) {
-        for request in pending.values { request.continuation.resume(throwing: error) }
-        pending.removeAll()
+    /// Ends the requests no connection holds.
+    func failUnclaimed(_ error: any Error) {
+        for (id, request) in pending where request.profile == nil { fail(id, error: error) }
     }
 
-    /// A connection ended: what it held without a go-ahead is free for another; what it was allowed to act on ends.
+    func finish(_ error: any Error = connectionLost()) {
+        for id in pending.keys { fail(id, error: error) }
+    }
+
+    /// An update is replacing this process: no go-ahead is given from now on. Each held request is given back untouched
+    /// (`Withdrawn`), so it can open elsewhere; the ones with the go-ahead finish here.
+    func retire() {
+        retired = true
+        for (id, request) in pending where !request.granted { fail(id, error: Withdrawn()) }
+    }
+
+    /// A connection ended: what it held is free for another; what it had the go-ahead for ends.
     func disconnected(profile: String) {
         for (id, request) in pending where request.profile == profile {
-            if request.granted { fail(id, error: POSIXError(.EPIPE)) }
+            if request.granted { fail(id, error: connectionLost()) }
             else { pending[id]?.profile = nil }
         }
     }
 
-    /// Marks the free requests not yet waiting on a wake as waiting on this one; answers whether there were any.
-    func waiting(on wake: UInt64) -> Bool {
-        var any = false
-        for (id, request) in pending where request.profile == nil && request.wake == nil {
-            pending[id]?.wake = wake
-            any = true
-        }
-        return any
-    }
-
-    /// A wake failed: the requests still waiting on it end, and no others.
-    func wakeFailed(_ wake: UInt64, error: any Error) {
-        for (id, request) in pending where request.profile == nil && request.wake == wake { fail(id, error: error) }
+    private func end(_ id: String, with result: Result<BridgeMessage, any Error>) {
+        pending.removeValue(forKey: id)?.continuation.resume(with: result)
     }
 }

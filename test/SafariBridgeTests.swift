@@ -131,7 +131,7 @@ struct SafariBridgeTests {
         precondition(authorization.type == "create-authorized" && authorization.id == creation.id && authorization.error == nil)
         try await recoveredSocket.close(code: .protocolCode(.goingAway))
         do { _ = try await uncertain.value; preconditionFailure("Authorized creation was replayed") }
-        catch let error as POSIXError { precondition(error.code == .EPIPE) }
+        catch { precondition(error.localizedDescription == connectionLost().localizedDescription) }
         for _ in 0..<18 {
             let replacement = try await connect(descriptor)
             let response = try await receive(replacement)
@@ -174,19 +174,29 @@ struct SafariBridgeTests {
         let focusedResult = try await toFocused.value
         precondition(focusedResult == "focused")
 
-        // The router can take a link back until the go-ahead: then the extension is refused and changes nothing.
-        let withdrawn = Task { try await idle.open("https://example.test/withdrawn") { false } }
-        let withdrawnRequest = try await receive(later)
-        try await send(BridgeMessage(type: "authorize-create", id: withdrawnRequest.id), to: later)
+        // An update replacing the app: a link Safari may be acting on (it has the go-ahead) finishes here; one it doesn't
+        // is given back untouched, Safari is refused the go-ahead for it, and nothing more goes to Safari.
+        let acting = Task { try await idle.open("https://example.test/acting") }
+        let actingRequest = try await receive(later)
+        try await send(BridgeMessage(type: "authorize-create", id: actingRequest.id), to: later)
+        let grant = try await receive(later)
+        precondition(grant.type == "create-authorized" && grant.error == nil)
+        let held = Task { try await idle.open("https://example.test/held") }
+        let heldRequest = try await receive(later)
+        await idle.retire()
+        do { _ = try await held.value; preconditionFailure("A held link stayed after retirement") } catch is Withdrawn {}
+        try await send(BridgeMessage(type: "authorize-create", id: heldRequest.id), to: later)
         let refusal = try await receive(later)
-        precondition(refusal.type == "create-authorized" && refusal.error != nil)
-        try await send(BridgeMessage(type: "result", id: withdrawnRequest.id, error: refusal.error), to: later)
-        do { _ = try await withdrawn.value; preconditionFailure("A withdrawn link was opened") } catch {}
-
-        // An installer replacing the app: the connected extension hears so first.
-        await idle.replaced()
-        let replaced = try await receive(idleSocket)
-        precondition(replaced.type == "replaced")
+        precondition(refusal.type == "create-authorized" && refusal.id == heldRequest.id && refusal.error != nil)
+        try await send(BridgeMessage(type: "result", id: actingRequest.id, result: "opened"), to: later)
+        let acted = try await acting.value
+        precondition(acted == "opened")
+        do { _ = try await idle.open("https://example.test/late"); preconditionFailure("A retired bridge took a link") }
+        catch is Withdrawn {}
+        let announced = await idleDeliveries.count
+        await idle.announce()
+        let unannounced = await idleDeliveries.count
+        precondition(unannounced == announced)
         await idle.stop()
 
         // A wake that fails late ends only the links still waiting on it: a link released since waits on a newer one.
@@ -252,7 +262,7 @@ struct SafariBridgeTests {
         catch { precondition(error.localizedDescription.contains("isn’t enabled in Safari")) }
         await disabled.stop()
         print("Safari loopback-only WebSocket, token authentication, bootstrap and re-announcement, warm reuse, focus " +
-              "selection, withdrawn go-aheads, scoped wake failures, disconnect handling, room for the extension, app " +
-              "replacement, Safari quitting and a disabled extension passed")
+              "selection, retirement, scoped wake failures, disconnect handling, room for the extension, Safari " +
+              "quitting and a disabled extension passed")
     }
 }

@@ -29,6 +29,12 @@ actor SafariBridge {
     private var connections: UInt64 = 0
     private var clock: UInt64 = 0
     private var wakes: UInt64 = 0
+    /// The wake attempt the links no context holds depend on: they end if it fails. A context taking them, or Safari
+    /// quitting, ends that dependence; a link let go after that needs a new wake, and a late failure of the old one
+    /// leaves it alone.
+    private var waking: UInt64?
+    /// An update is replacing the app: it hands nothing more to Safari.
+    private var retired = false
     /// The listener failed: this instance takes no more links, and the app makes a new one.
     private(set) var ended = false
     private lazy var exchange = BridgeExchange { [weak self] _ in await self?.dispatch() }
@@ -70,13 +76,16 @@ actor SafariBridge {
     deinit { serving?.cancel() }
 
     /// Safari quit: the links still waiting for it end with error.
-    func end(_ error: any Error) async { await exchange.finish(error) }
+    func end(_ error: any Error) async {
+        waking = nil
+        await exchange.finish(error)
+    }
 
-    /// An installer is replacing the app: each connected extension hears so, and gets ready for the new one at once.
-    func replaced() async {
-        for client in clients.values where client.authenticated {
-            try? await send(BridgeMessage(type: "replaced"), to: client.connection)
-        }
+    /// An update is replacing the app: no more wakes or go-aheads, and the links still held are given back (`Withdrawn`).
+    /// Links Safari may already be acting on finish here.
+    func retire() async {
+        retired = true
+        await exchange.retire()
     }
 
     func stop() async {
@@ -85,17 +94,18 @@ actor SafariBridge {
         await finish()
     }
 
+    /// The listener ended: the links no context has the go-ahead for go back untouched, for a new bridge to take.
     private func finish() async {
         ended = true
         clients.removeAll()
+        await exchange.retire()
         await exchange.finish()
     }
 
-    /// Opens a link in Safari. `pass` is asked at the extension's go-ahead: whether the link is still this app's.
-    func open(_ url: String, pass: @escaping @Sendable () -> Bool = { true }) async throws -> String {
-        guard !ended else { throw POSIXError(.EPIPE) }
+    func open(_ url: String) async throws -> String {
+        guard !ended else { throw Withdrawn() }
         let reply: BridgeMessage
-        do { reply = try await exchange.request(url, pass: pass) }
+        do { reply = try await exchange.request(url) }
         catch {
             let failure = error as NSError
             Self.log.error("Safari transport: failed \(failure.domain, privacy: .public) \(failure.code)")
@@ -117,11 +127,13 @@ actor SafariBridge {
     /// goes to the authenticated context whose profile had focus last (the first to connect if none did). With none
     /// connected, Safari's extension is sent the address; if that fails, the links that were waiting on it end.
     private func dispatch(announcing: Bool = false) async {
+        guard !retired else { return }
         let ready = clients.filter(\.value.authenticated)
             .max { ($0.value.activity, $1.value.order) < ($1.value.activity, $0.value.order) }
         if let (identity, client) = ready {
             for request in await exchange.unclaimed() {
                 guard let id = request.id, await exchange.claim(id, profile: identity) else { continue }
+                waking = nil
                 do {
                     try await send(request, to: client.connection)
                     Self.log.notice("Safari transport: sent")
@@ -132,21 +144,26 @@ actor SafariBridge {
             }
             if !announcing { return }
         }
-        wakes += 1
-        let wake = wakes
-        let waiting = await exchange.waiting(on: wake)
+        // Links already waiting on a wake keep waiting on it; an announcement on top changes nothing for them.
+        let unclaimed = await !exchange.unclaimed().isEmpty
+        let waiting = waking == nil && unclaimed
         guard waiting || announcing else { return }
+        wakes += 1
+        let attempt = wakes
+        if waiting { waking = attempt }
         Self.log.notice("Safari transport: bootstrap")
         let code = HMAC<SHA256>.authenticationCode(for: Self.authenticationData, using: key)
         do {
             try await self.wake(BridgeMessage(type: "connect", endpoint: endpoint, token: Data(code).base64EncodedString()))
             // A disabled extension never connects, so its links end here instead of waiting. Safari takes about a
             // second to answer, so the question follows the wake: the links are on their way meanwhile.
-            if waiting, !(try await enabled()) {
+            if waking == attempt, !(try await enabled()) {
                 throw failure("Link Reuse isn’t enabled in Safari. Turn it on in Safari Settings → Extensions.")
             }
         } catch {
-            await exchange.wakeFailed(wake, error: error)
+            guard waking == attempt else { return }
+            waking = nil
+            await exchange.failUnclaimed(error)
         }
     }
 

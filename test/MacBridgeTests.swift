@@ -11,6 +11,17 @@ struct MacBridgeTests {
             _ = FileHandle.standardInput.readDataToEndOfFile()
             exit(0)
         }
+        // A second copy standing in for the new version an update hands links to: it takes them in order.
+        if CommandLine.arguments.contains(Successor.argument) {
+            if ProcessInfo.processInfo.environment["LINK_REUSE_TEST_UNREADY"] != nil { exit(0) }
+            var next = 1
+            Successor.receive { message in
+                if message.url == "https://example.test/vanish" { exit(0) }
+                precondition(message.url == "https://example.test/\(next)")
+                next += 1
+            }
+            exit(0)
+        }
         try MacBridge.prepare()
         guard let started = MacBridge.processStarted(getpid()) else { throw POSIXError(.EPERM) }
         let session = BridgeSession(id: UUID().uuidString, browser: "test.link-reuse", pid: getpid(), started: started, activeAt: 1)
@@ -44,18 +55,29 @@ struct MacBridgeTests {
         let response = try await Task.detached { try MacBridge.send("https://example.test/item?x=one&y=two", session: session) }.value
         precondition(response == "focused")
         try await server.value
-        // A link the router took back (an update handed it on) never reaches the host.
-        let untouched = Task.detached {
-            let client = accept(descriptor, nil, nil)
-            precondition(client >= 0)
-            let stream = FileHandle(fileDescriptor: client, closeOnDealloc: true)
-            check(try Wire.readFrame(from: stream) == nil)
+        // A host an update is replacing gives the link back untouched; one that ends without answering may have opened it;
+        // one never reached never got it.
+        func peer(answering answer: BridgeMessage?) -> Task<Void, Error> {
+            Task.detached {
+                let client = accept(descriptor, nil, nil)
+                precondition(client >= 0)
+                let stream = FileHandle(fileDescriptor: client, closeOnDealloc: true)
+                defer { try? stream.close() }
+                _ = try Wire.readFrame(from: stream)
+                if let answer { try Wire.writeFrame(JSONEncoder().encode(answer), to: stream) }
+            }
         }
-        do {
-            _ = try await Task.detached { try MacBridge.send("https://example.test/item", session: session) { false } }.value
-            preconditionFailure("A withdrawn link was written")
-        } catch is CancellationError {}
-        try await untouched.value
+        let withdrawing = peer(answering: BridgeMessage(type: "withdrawn"))
+        do { _ = try await Task.detached { try MacBridge.send("https://example.test/item", session: session) }.value
+             preconditionFailure("A withdrawn link was reported done") } catch is Withdrawn {}
+        try await withdrawing.value
+        let ending = peer(answering: nil)
+        do { _ = try await Task.detached { try MacBridge.send("https://example.test/item", session: session) }.value
+             preconditionFailure("A lost answer was reported done") }
+        catch { check(error.localizedDescription == connectionLost().localizedDescription) }
+        try await ending.value
+        do { _ = try MacBridge.send("https://example.test/item", session: newer); preconditionFailure("An unreachable host took a link") }
+        catch is Withdrawn {}
         let socketAttributes = try FileManager.default.attributesOfItem(atPath: session.socket.path)
         precondition((socketAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
 
@@ -157,7 +179,28 @@ struct MacBridgeTests {
         check(!resources.registered(in: browser, applicationSupport: support))
         check(!resources.registered(in: safari, applicationSupport: support))
 
-        print("macOS IPC round trip, withdrawn links, live-session selection and focus order, private permissions, " +
+        // Handing links to the new version: each is taken in order; one it ends while taking may have opened; once it
+        // has ended, or the hand-over is closed, nothing more is taken; and a new version that never gets ready takes none.
+        let executable = URL(filePath: CommandLine.arguments[0])
+        func link(_ path: String) -> BridgeMessage { BridgeMessage(type: "open", url: "https://example.test/" + path) }
+        func refused(_ successor: Successor, _ message: BridgeMessage, _ expected: NSError) async {
+            do { try await successor.hand(message); preconditionFailure("A link was taken") }
+            catch { check(error.localizedDescription == expected.localizedDescription) }
+        }
+        let successor = try Successor(executable)
+        for index in 1...3 { try await successor.hand(link("\(index)")) }
+        await refused(successor, link("vanish"), Successor.uncertain())
+        await refused(successor, link("4"), Successor.notTaken())
+        let closing = try Successor(executable)
+        try await closing.hand(link("1"))
+        closing.close()
+        await refused(closing, link("2"), Successor.notTaken())
+        setenv("LINK_REUSE_TEST_UNREADY", "1", 1)
+        let unready = try Successor(executable)
+        unsetenv("LINK_REUSE_TEST_UNREADY")
+        await refused(unready, link("1"), Successor.notTaken())
+
+        print("macOS IPC round trip, withdrawn and lost links, hand-over to a new version, live-session selection and focus order, private permissions, " +
               "bounded framing, extension and registration detection, connection-wait and replaced-host checks passed")
     }
 }
