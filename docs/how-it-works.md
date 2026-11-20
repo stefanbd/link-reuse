@@ -31,8 +31,13 @@ expressions matched against the whole host and path, and `identity` is a replace
 
 On a resource a rule recognises, query parameters are view state: a focused comment, a tab, tracking. A rule lists only
 the parameters that choose a different resource; for Jira that is `selectedIssue`. With `ignoreAnchor` the anchor
-is ignored too, except app routes (`#/`, `#!`). The defaults cover Jira issues, Confluence pages and GitHub issues
-and pull requests. Identities include the rule name and origin, so tenants and repositories stay apart.
+is ignored too, except app routes (`#/`, `#!`). The defaults cover Jira issues (at `/browse/KEY` and
+`/jira/browse/KEY`), Confluence pages and GitHub issues and pull requests. Identities include the rule name and origin,
+so tenants and repositories stay apart.
+
+Matching never guesses from an address's shape, such as a shared ID or one path ending another: the same ID under a
+sandbox, a language or another tenant is a different page. Rules and learning are the only ways two different addresses
+match.
 
 Three formats need more than a regular expression and live in `extension/url-rules.js`:
 
@@ -52,7 +57,9 @@ Three formats need more than a regular expression and live in `extension/url-rul
 
 Learning is stored in the browser profile's local extension storage, up to 4,096 records and 2 MiB, so it survives
 browser restarts and updates. A record is dropped once no tab in a normal window needs it, and a redirect from an address
-is forgotten once a navigation seen starting there loads that address itself. Restored records are checked against open
+is forgotten once a navigation seen starting there loads that address itself. A redirect or canonical link between
+two selectors of one rule-identified resource (a Jira issue with and without `selectedIssue`) isn't learned, so learning
+never joins what a rule keeps apart. Restored records are checked against open
 tabs before use, once the browser lists a web page: a starting browser starts its extensions before it restores its
 windows, and then restores them all at once, so a new tab page alone isn't the restored session. Sign-in and
 authentication pages, addresses carrying tokens and private windows are never learned. Nothing is synced.

@@ -141,9 +141,20 @@ export class LiveLearning {
     for (const record of records) {
       if (!['redirect', 'canonical'].includes(record.kind) || !allowsLearning(record.source, this.policy)) continue;
       const key = record.kind + '\n' + normalizedKey(record.source, this.policy);
-      if (record.destination === null || !allowsLearning(record.destination, this.policy)) this.remove(key);
+      if (record.destination === null || !allowsLearning(record.destination, this.policy) ||
+        this.selectsOther(record.source, record.destination)) this.remove(key);
       else this.put(key, { source: urlKey(record.source), destination: urlKey(record.destination) });
     }
+  }
+
+  /**
+   * Whether two addresses are one rule-identified resource under different selectors (a Jira issue with and without
+   * selectedIssue). Those stay apart however a page links them, so a canonical or redirect between them isn't learned.
+   */
+  selectsOther(left, right) {
+    const [a, b] = [left, right].map(value => this.rules(value, this.policy).identity);
+    const resource = identity => identity?.startsWith('[') ? JSON.stringify(JSON.parse(identity).slice(0, 3)) : null;
+    return a !== b && resource(a) !== null && resource(a) === resource(b);
   }
 
   put(key, value) {

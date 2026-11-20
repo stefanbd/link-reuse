@@ -19,6 +19,21 @@ test('invalid configured patterns cannot disable normal URL matching', () => {
   assert.equal(learning.matches(learning.resolve(url), { id: 1, url }), true);
 });
 
+test('learning never joins two selectors of one resource, while a moved resource still redirects', () => {
+  const learning = new LiveLearning(policy);
+  const issue = 'https://example.atlassian.net/browse/DEMO-375';
+  const selected = issue + '?selectedIssue=OPS-8';
+  learning.observe([{ kind: 'canonical', source: selected, destination: issue }]);
+  learning.observe([{ kind: 'redirect', source: 'https://example.atlassian.net/jira/browse/DEMO-375?selectedIssue=OPS-9', destination: issue }]);
+  assert.equal(learning.records.size, 0);
+  for (const [request, candidate] of [[issue, selected], [selected, issue]]) {
+    assert.equal(learning.matches(learning.resolve(request), { id: 1, url: candidate }), false);
+  }
+  const moved = 'https://example.atlassian.net/browse/NEW-5';
+  learning.observe([{ kind: 'redirect', source: issue, destination: moved }]);
+  assert.equal(learning.matches(learning.resolve(issue), { id: 1, url: moved }), true);
+});
+
 test('learned redirect sources use the same comparison normalization as open tabs', () => {
   const learning = new LiveLearning(policy);
   const target = 'https://example.test/item';

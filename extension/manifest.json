@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Link Reuse",
-  "version": "3.2.67",
+  "version": "3.2.68",
   "description": "Reuse existing tabs for web links using observed redirects and same-resource URLs stored locally.",
   "icons": {
     "16": "icons/16.png",

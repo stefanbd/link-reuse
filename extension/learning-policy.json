@@ -13,7 +13,7 @@
     {
       "name": "jira-issue",
       "host": "[a-z0-9-]+\\.atlassian\\.net",
-      "path": "/browse/([A-Za-z][A-Za-z0-9_]*-[0-9]+)/?",
+      "path": "(?:/jira)?/browse/([A-Za-z][A-Za-z0-9_]*-[0-9]+)/?",
       "identity": "$1",
       "uppercase": true,
       "ignoreAnchor": true,

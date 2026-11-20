@@ -166,6 +166,7 @@ test('a link matches by the same keys the background uses: normalized URL or ide
   const identity = JSON.stringify(['jira-issue', 'https://acme.atlassian.net', 'OPS-7', '', '']);
   for (const [href, keys] of [
     ['https://acme.atlassian.net/browse/ops-7/', [identity]],
+    ['https://acme.atlassian.net/jira/browse/OPS-7?focusedCommentId=1', [identity]],
     [issue + '?searchId=4#comment', [identity]],
     ['https://example.test/item?utm_source=mail&b=2&a=1', ['https://example.test/item?a=1&b=2']],
   ]) {
