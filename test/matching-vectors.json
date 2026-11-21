@@ -36,5 +36,11 @@
   {"name":"Entity hash routes preserved", "left":"https://example.atlassian.net/browse/DEMO-123#/one", "right":"https://example.atlassian.net/browse/DEMO-123#/two", "match":false},
   {"name":"Encoded path separator preserved", "left":"https://site.test/a%2Fb", "right":"https://site.test/a/b", "match":false},
   {"name":"Tracking prefix cannot swallow other names", "left":"https://site.test/?utmost=one", "right":"https://site.test/?utmost=two", "match":false},
-  {"name":"Token cannot become safe through normalization", "left":"https://site.test/?token=example&utm_source=email", "right":"https://site.test/?token=example", "match":false}
+  {"name":"A link carrying a token matches its tab without tracking parameters", "left":"https://site.test/?token=example&utm_source=email", "right":"https://site.test/?token=example", "match":true},
+  {"name":"A page about verification or sign-in is a page like any other", "left":"https://docs.example.test/connectors/verification", "right":"https://docs.example.test/connectors/verification", "match":true},
+  {"name":"A docs page under oauth2 matches without its tracking parameters", "left":"https://developers.example.test/identity/protocols/oauth2?utm_source=chat", "right":"https://developers.example.test/identity/protocols/oauth2", "match":true},
+  {"name":"A Confluence page titled Verification matches by page ID", "left":"https://example.atlassian.net/wiki/spaces/TEAM/pages/123/Verification?focusedCommentId=5", "right":"https://example.atlassian.net/wiki/spaces/TEAM/pages/123/Old+title", "match":true},
+  {"name":"A sign-out link always loads", "left":"https://example.test/account/sign-out", "right":"https://example.test/account/sign-out", "match":false},
+  {"name":"A one-time link matches the tab that already opened it", "left":"https://example.test/verify?token=abc", "right":"https://example.test/verify?token=abc", "match":true},
+  {"name":"A sign-out action in the query always loads", "left":"https://example.test/wp-login.php?action=logout", "right":"https://example.test/wp-login.php?action=logout", "match":false}
 ]

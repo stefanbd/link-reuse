@@ -23,6 +23,11 @@ The native apps never match tabs. All matching happens in the extension, so Wind
 Generic matching never strips trailing slashes or fragments, since `/item` and `/item/`, or `#inbox` and `#sent`, can be
 different pages. A request that matches nothing opens the original URL unchanged.
 
+A link whose loading is itself an action always loads, and a tab showing one is never switched to: signing out or
+starting a sign-in (`actionSegments`, in the path, query or fragment). Every other address can be reused, including a
+sign-in form, a page about verification and a link carrying a token: matching compares addresses the browser already
+has and keeps nothing. Learning and the fingerprints pages get are stricter (below).
+
 ### Site rules
 
 `identityRules` in `extension/learning-policy.json` recognise a resource from its address:
@@ -62,7 +67,8 @@ two selectors of one rule-identified resource (a Jira issue with and without `se
 never joins what a rule keeps apart. Restored records are checked against open
 tabs before use, once the browser lists a web page: a starting browser starts its extensions before it restores its
 windows, and then restores them all at once, so a new tab page alone isn't the restored session. Sign-in and
-authentication pages, addresses carrying tokens and private windows are never learned. Nothing is synced.
+authentication pages (`blockedPathSegments`, `blockedHostPrefixes`), addresses carrying tokens and private windows are
+never learned: a redirect through a sign-in page is a passing state, not where an address leads. Nothing is synced.
 
 Private browsing is invisible to Link Reuse: its page scripts do nothing in a private window, and the background ignores
 private tabs' messages and navigation. Chromium never runs the extension there; Safari can, so there each tab is checked

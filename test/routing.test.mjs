@@ -662,29 +662,34 @@ test('loading transitions keep learning until the new document settles', () => {
   assert.equal(learning.records.size, 0);
 });
 
-test('sensitive URLs bypass reuse, private tabs are ignored, learning stays bounded', async () => {
+test('sign-in pages and token links reuse their tab but are never learned, actions and private tabs always load', async () => {
   const learning = new LiveLearning({ ...policy, maxRecords: 3, maxCacheBytes: 600 });
   for (let i = 0; i < 100; i++) learning.observe([{ kind: 'redirect', source: `https://example.test/${i}`, destination: 'https://example.test/live' }]);
   assert.ok(learning.records.size <= 3 && learning.bytes <= 600);
   const sensitive = 'https://example.test/callback?code=secret';
-  const h = browser([{ url: sensitive }, { url: 'https://example.test/private', incognito: true }]);
-  await routeToTab(sensitive, learning, h.api);
-  await routeToTab('https://example.test/private', learning, h.api);
-  assert.equal(h.calls.filter(call => call[0] === 'create').length, 2);
-  learning.observe([{ kind: 'redirect', source: sensitive, destination: place }]);
-  assert.equal([...learning.records.values()].some(value => value.source === sensitive), false);
+  const docs = 'https://docs.example.test/connectors/verification';
+  const signOut = 'https://example.test/account/sign-out';
+  const h = browser([{ url: sensitive }, { url: docs }, { url: signOut }, { url: 'https://example.test/private', incognito: true }]);
+  for (const [url, result] of [[sensitive, 'focused'], [docs, 'focused'], [signOut, 'opened'], ['https://example.test/private', 'opened']]) {
+    assert.deepEqual(await routeToTab(url, learning, h.api), { result }, url);
+  }
+  assert.deepEqual(h.calls.filter(call => call[0] === 'create').map(call => call[1].url), [signOut, 'https://example.test/private']);
+  learning.observe([{ kind: 'redirect', source: sensitive, destination: place }, { kind: 'redirect', source: place, destination: docs }]);
+  assert.equal([...learning.records.values()].some(value => [value.source, value.destination].includes(sensitive) ||
+    value.destination === docs), false);
 });
 
-test('OpenID sign-in redirects and login hints bypass learning and existing-tab reuse', async () => {
+test('a sign-in redirect always loads and a login hint reuses its tab, and neither is learned', async () => {
   const urls = ['https://slack.com/openid/connect/login_initiate_redirect', 'https://example.test/entry?login_hint=example'];
   const learning = new LiveLearning(policy);
   const h = browser(urls.map(url => ({ url })));
+  const results = [];
   for (const url of urls) {
     learning.observe([{ kind: 'redirect', source: url, destination: 'https://example.test/live' }]);
-    await routeToTab(url, learning, h.api);
+    results.push((await routeToTab(url, learning, h.api)).result);
   }
   assert.equal(learning.records.size, 0);
-  assert.equal(h.calls.filter(call => call[0] === 'create').length, 2);
+  assert.deepEqual(results, ['opened', 'focused']);
 });
 
 test('Slack sign-in link hints reuse the original destination without learning or navigating the token', async () => {
@@ -711,7 +716,7 @@ test('an unmatched Slack hint preserves the original sign-in navigation', async 
   assert.equal(h.calls.find(call => call[0] === 'create')[1].url, url);
 });
 
-test('Slack hint extraction rejects other endpoints, malformed data and sensitive or private targets', async () => {
+test('Slack hint extraction rejects other endpoints, malformed data and action or private targets', async () => {
   const target = 'https://example.test/item';
   const valid = slackLink(target);
   const cases = [
@@ -722,13 +727,13 @@ test('Slack hint extraction rejects other endpoints, malformed data and sensitiv
     valid + '&login_hint=example',
     'https://slack.com/openid/connect/login_initiate_redirect?login_hint=invalid',
     slackLink(target, { iss: 'https://example.test' }),
-    slackLink('https://example.test/callback?code=example'),
+    slackLink('https://example.test/logout'),
     slackLink('https://someone:example@example.test/item'),
     slackLink('javascript:alert(1)'),
     slackLink('https://example.test/' + 'a'.repeat(policy.maxURLBytes)),
   ];
   for (const url of cases) {
-    const h = browser([{ url: target }, { url: 'https://example.test/callback?code=example' }]);
+    const h = browser([{ url: target }, { url: 'https://example.test/logout' }]);
     assert.deepEqual(await routeToTab(url, new LiveLearning(policy), h.api), { result: 'opened' });
     assert.equal(h.calls.find(call => call[0] === 'create')[1].url, url);
   }
@@ -1216,6 +1221,7 @@ test('pages get fingerprints of the other tabs\' match keys on every site, inclu
     { id: 3, url: 'https://github.com/acme/app/pull/9' },
     { id: 4, url: 'https://acme.atlassian.net/login?token=secret' },
     { id: 5, url: 'https://acme.atlassian.net/browse/OPS-9', incognito: true },
+    { id: 6, url: 'https://docs.example.test/connectors/verification' },
   ];
   const index = reuseIndex(tabs, learning);
   const jira = pageKeys(index, tabs[0]);
@@ -1223,11 +1229,13 @@ test('pages get fingerprints of the other tabs\' match keys on every site, inclu
   const ops7 = ['https://acme.atlassian.net/browse/ops-7', JSON.stringify(['jira-issue', 'https://acme.atlassian.net', 'OPS-7', '', '']),
     'https://acme.atlassian.net/l/short'];
   // Only numbers reach a page: OPS-7's address, normalized address and issue identity and the learned short link, and
-  // the GitHub pull request. Never the login page, the private tab or the page's own issue.
+  // the GitHub pull request. Never the login page, a page whose address could hold a short code (pages could test
+  // guesses at it), the private tab or the page's own issue. The background still reuses those it may.
   assert.ok(jira.every(Number.isSafeInteger));
   for (const key of [...ops7, 'https://github.com/acme/app/pull/9']) assert.ok(jira.includes(fingerprint(key)), key);
   for (const key of ops7) assert.ok(github.includes(fingerprint(key)), key);
-  for (const key of ['https://acme.atlassian.net/login?token=secret', 'https://acme.atlassian.net/browse/OPS-9']) {
+  for (const key of ['https://acme.atlassian.net/login?token=secret', 'https://acme.atlassian.net/browse/OPS-9',
+    'https://docs.example.test/connectors/verification']) {
     assert.ok(!jira.includes(fingerprint(key)) && !github.includes(fingerprint(key)), key);
   }
   assert.ok(!jira.includes(fingerprint('https://acme.atlassian.net/browse/OPS-1')));

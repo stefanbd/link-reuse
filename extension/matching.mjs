@@ -1,4 +1,4 @@
-import { allowsLearning } from './learning.mjs';
+import { allowsLearning, allowsReuse } from './learning.mjs';
 import { urlRules, normalizedKey } from './url-rules.mjs';
 import { isSafari } from './native-port.mjs';
 
@@ -66,7 +66,7 @@ export class LiveLearning {
     const url = target || original;
     const format = target ? this.rules(target, this.policy) : direct;
     return {
-      url, allowed: allowsLearning(url, this.policy),
+      url, reusable: allowsReuse(url, this.policy),
       entry: format.entry, scope: format.scope, directEntry: direct.entry,
     };
   }
@@ -107,14 +107,14 @@ export class LiveLearning {
   }
 
   matches(request, tab) {
-    if (!tab || tab.incognito || (!request.allowed && !request.entry)) return false;
+    if (!tab || tab.incognito || (!request.reusable && !request.entry)) return false;
     const value = tab.pendingUrl || tab.url;
     if (request.entry) {
       const current = this.resolve(value);
       return current.scope === request.entry && (allowsLearning(value, this.policy) ||
         current.directEntry === request.entry || this.records.get('launch\n' + tab.id)?.entry === request.entry);
     }
-    return allowsLearning(value, this.policy) && this.equivalent(request.url, value);
+    return allowsReuse(value, this.policy) && this.equivalent(request.url, value);
   }
 
   rememberLaunch(tabId, request) {
@@ -266,7 +266,7 @@ export async function routeToTab(url, learning, browser, windowFocusOrder = new 
 
   if (opening.reuseOnly) return { result: 'none' };
   // Safari lists only tabs on websites it lets the extension see; a site outside that can't be checked for a match.
-  if ((request.allowed || request.entry) && isSafari(browser) &&
+  if ((request.reusable || request.entry) && isSafari(browser) &&
       !await browser.permissions.contains({ origins: [new URL(request.url).origin + '/*'] })) {
     throw new Error(`Allow Link Reuse on ${new URL(request.url).host} in Safari Settings → Extensions → ` +
       'Link Reuse, so it can find that website\'s open tabs.');
